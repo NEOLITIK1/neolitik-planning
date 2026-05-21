@@ -440,11 +440,6 @@ export default function App() {
     if(!src||src.weekNum!==weekNum||src.shift===targetShift) return;
     const srcSlot=schedules.find(s=>s.week===weekNum)?.slots[src.shift]||[];
     const tgtSlot=schedules.find(s=>s.week===weekNum)?.slots[targetShift]||[];
-    // Vérifier capacité max
-    if(tgtSlot.length>=SHIFT_MAX[targetShift]){
-      flash(`❌ Poste ${targetShift} déjà complet (max ${SHIFT_MAX[targetShift]})`, "#c62828");
-      dragRef.current=null; return;
-    }
     const cleanName = src.name.replace(/^[↺⚠]/,"");
     const nSrc=srcSlot.filter(n=>n!==src.name), nTgt=[...tgtSlot,cleanName];
     pushHistory(`Glissement: ${cleanName} S${weekNum} ${src.shift}→${targetShift}`, {overrides,pinnedOverrides});
