@@ -38,10 +38,10 @@ const DEFAULT_OPERATORS = [
   { id:"cadinot",  full:"Thomas CADINOT",     short:"CADINOT",  level:"N1", active:true },
   { id:"allain",   full:"Jason ALLAIN",        short:"ALLAIN",   level:"N1", active:true },
 ];
+const DEFAULT_SHORTS = DEFAULT_OPERATORS.map(o => o.short);
 const REF_WEEK = 22;
 const BRAND = "#3a5c35";
 
-// Cycles N4 dans les 3 directions possibles
 const N4_CYCLES = {
   "matin-am-nuit": [
     { matin:["GIBEAUX"],  am:["MARTIN"],   nuit:["LENDORMY"] },
@@ -83,6 +83,10 @@ const NON_N4_CYCLES = {
   ],
 };
 
+// Capacités max/min par poste
+const SHIFT_MAX = { matin:3, am:2, nuit:3 };
+const SHIFT_MIN = { matin:3, am:2, nuit:3 };
+
 const LEVEL_BADGE = {
   N4:{ bg:"#C8E6C9", color:"#1B5E20" },
   N3:{ bg:"#FFF9C4", color:"#F57F17" },
@@ -96,107 +100,171 @@ const CYCLE_OPTIONS = [
   { value:"am-nuit-matin", label:"AM → Nuit → Matin" },
 ];
 
-function getMondayOfWeek(w, year=2026) {
-  const jan1=new Date(year,0,1), d=jan1.getDay()||7;
-  const mon=new Date(year,0,d<=4?2-d:9-d);
-  mon.setDate(mon.getDate()+(w-1)*7); return mon;
+function getMondayOfWeek(w, year) {
+  const jan1 = new Date(year, 0, 1), d = jan1.getDay() || 7;
+  const mon = new Date(year, 0, d <= 4 ? 2 - d : 9 - d);
+  mon.setDate(mon.getDate() + (w - 1) * 7);
+  return mon;
 }
 function fmtDate(d) { return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`; }
-function formatWeekDates(w) {
-  const m=getMondayOfWeek(w), s=new Date(m); s.setDate(m.getDate()+4);
+function formatWeekDates(w, year) {
+  const m = getMondayOfWeek(w, year), s = new Date(m); s.setDate(m.getDate() + 4);
   return `${fmtDate(m)} – ${fmtDate(s)}`;
 }
-function getCurrentWeek() {
-  const now=new Date(), jan1=new Date(now.getFullYear(),0,1);
-  return Math.ceil(((now-jan1)/86400000+jan1.getDay()+1)/7);
+function getCurrentWeek(year) {
+  const now = new Date();
+  const jan1 = new Date(year, 0, 1), d = jan1.getDay() || 7;
+  const firstMon = new Date(year, 0, d <= 4 ? 2 - d : 9 - d);
+  const diff = Math.floor((now - firstMon) / 86400000);
+  return diff < 0 ? 1 : Math.floor(diff / 7) + 1;
 }
 
-function computeSchedule(weekNum, operators, absences, leaves, cycleDir) {
-  const activeOps = operators.filter(o=>o.active);
-  const n4ops = activeOps.filter(o=>o.level==="N4").map(o=>o.short);
-  const n4Ph = ((weekNum-REF_WEEK)%3+3)%3;
-  const nonPh = ((weekNum-REF_WEEK)%5+5)%5;
+// ── ALGORITHME PRINCIPAL ──
+function computeSchedule(weekNum, operators, absences, leaves, cycleDir, pinnedOverrides) {
+  const activeOps = operators.filter(o => o.active);
+  const n4ops = activeOps.filter(o => o.level === "N4").map(o => o.short);
+  const nonN4ops = activeOps.filter(o => o.level !== "N4").map(o => o.short);
+  const n4Ph = ((weekNum - REF_WEEK) % 3 + 3) % 3;
+  const nonPh = ((weekNum - REF_WEEK) % 5 + 5) % 5;
 
+  // Absences complètes (semaine entière) = congés complets + absences semaine
+  const weekAbsFull = [
+    ...(absences[weekNum] || []).filter(e => !e.includes("|")),
+    ...(leaves[weekNum] || []).filter(e => !e.includes(":")),
+  ];
+  // Absences partielles (jour)
+  const weekAbsPartial = (absences[weekNum] || []).filter(e => e.includes("|"));
+
+  // Base algorithmique N4 + non-N4
   const n4Base = N4_CYCLES[cycleDir][n4Ph];
   const nonBase = NON_N4_CYCLES[cycleDir][nonPh];
-
-  // absences complètes semaine
-  const weekAbsFull = [...(absences[weekNum]||[]).filter(e=>!e.includes("|")), ...(leaves[weekNum]||[]).filter(e=>!e.includes(":"))];
-  // absences partielles (jour)
-  const weekAbsPartial = (absences[weekNum]||[]).filter(e=>e.includes("|"));
-
   const slots = {
-    matin:[...(n4Base.matin||[]),...(nonBase.matin||[])],
-    am:   [...(n4Base.am||[]),   ...(nonBase.am||[])  ],
-    nuit: [...(n4Base.nuit||[]), ...(nonBase.nuit||[])],
+    matin: [...(n4Base.matin || []), ...(nonBase.matin || [])],
+    am:    [...(n4Base.am    || []), ...(nonBase.am    || [])],
+    nuit:  [...(n4Base.nuit  || []), ...(nonBase.nuit  || [])],
   };
 
-  // Nouveaux opérateurs
-  const newOps = activeOps.filter(o=>!DEFAULT_OPERATORS.some(d=>d.short===o.short));
-  newOps.forEach(op=>{
-    const off=((weekNum-REF_WEEK)%15+15)%15;
-    const idx=newOps.findIndex(o2=>o2.short===op.short);
-    const sh=["matin","am","nuit"][(idx+off)%3];
-    if(!slots[sh].includes(op.short)) slots[sh].push(op.short);
+  // Retirer les opérateurs inactifs
+  ["matin","am","nuit"].forEach(sh => {
+    slots[sh] = slots[sh].filter(s => activeOps.some(o => o.short === s));
   });
 
-  const alerts=[];
+  // Intégrer les nouveaux opérateurs (hors DEFAULT) en respectant les contraintes
+  const newOps = activeOps.filter(o => !DEFAULT_SHORTS.includes(o.short));
+  newOps.forEach(op => {
+    // Vérifier les pinned overrides : si l'op est épinglé quelque part cette semaine, on le place là
+    const pinnedKey = `${weekNum}-${op.short}`;
+    if (pinnedOverrides[pinnedKey]) {
+      const targetShift = pinnedOverrides[pinnedKey];
+      if (slots[targetShift].length < SHIFT_MAX[targetShift] && !slots[targetShift].includes(op.short)) {
+        slots[targetShift].push(op.short);
+        return;
+      }
+    }
+    // Sinon, placer dans le poste avec le moins de monde qui a encore de la place
+    const available = ["matin","am","nuit"].filter(sh => slots[sh].length < SHIFT_MAX[sh]);
+    if (available.length > 0) {
+      // Trier par nombre d'occupants croissant
+      available.sort((a,b) => slots[a].length - slots[b].length);
+      // Rotation équitable basée sur la semaine
+      const off = ((weekNum - REF_WEEK) % available.length + available.length) % available.length;
+      const targetShift = available[off % available.length];
+      slots[targetShift].push(op.short);
+    }
+  });
 
-  // Remplacements absences complètes
-  ["matin","am","nuit"].forEach(shift=>{
-    slots[shift].filter(s=>weekAbsFull.includes(s)).forEach(absent=>{
-      const isN4=activeOps.find(o=>o.short===absent)?.level==="N4";
-      const used=new Set([...slots.matin,...slots.am,...slots.nuit].filter(s=>!weekAbsFull.includes(s)));
-      let rep=null;
-      if(isN4) rep=n4ops.find(s=>!used.has(s)&&!weekAbsFull.includes(s));
-      if(!rep) rep=activeOps.map(o=>o.short).find(s=>!used.has(s)&&!weekAbsFull.includes(s));
-      if(rep){
-        const mk=activeOps.find(o=>o.short===rep)?.level==="N4"?"↺":"⚠";
-        slots[shift]=slots[shift].map(s=>s===absent?`${mk}${rep}`:s);
-        used.add(rep);
+  const alerts = [];
+
+  // ── Remplacements absences complètes ──
+  ["matin","am","nuit"].forEach(shift => {
+    const absentInShift = slots[shift].filter(s => weekAbsFull.includes(s));
+    absentInShift.forEach(absent => {
+      const isN4 = n4ops.includes(absent);
+      const allAssigned = new Set([...slots.matin, ...slots.am, ...slots.nuit]);
+      const available = activeOps.map(o => o.short).filter(s =>
+        !allAssigned.has(s) && !weekAbsFull.includes(s)
+      );
+      let rep = null;
+      // Priorité N4 si le manquant est N4
+      if (isN4) rep = available.find(s => n4ops.includes(s));
+      // Sinon premier disponible
+      if (!rep) rep = available[0];
+
+      if (rep) {
+        const mk = n4ops.includes(rep) ? "↺" : "⚠";
+        slots[shift] = slots[shift].map(s => s === absent ? `${mk}${rep}` : s);
       } else {
-        slots[shift]=slots[shift].filter(s=>s!==absent);
-        alerts.push(`S${weekNum}: manque en ${shift} (${absent} absent)`);
+        slots[shift] = slots[shift].filter(s => s !== absent);
+        alerts.push(`⛔ S${weekNum}: aucun remplaçant disponible en ${shift} (${absent} absent)`);
       }
     });
   });
 
-  // Alertes absences partielles (info seulement)
-  weekAbsPartial.forEach(entry=>{
-    const [short,,dayLabel]=entry.split("|");
-    alerts.push(`S${weekNum}: ${short} absent le ${dayLabel} (absence partielle)`);
+  // ── Vérifications contraintes ──
+  ["matin","am","nuit"].forEach(shift => {
+    const cleanSlot = slots[shift].map(s => s.replace(/^[↺⚠]/, ""));
+    // Contrainte N4
+    if (!cleanSlot.some(s => n4ops.includes(s))) {
+      alerts.push(`⚠ S${weekNum}: aucun N4 en ${shift}`);
+    }
+    // Contrainte effectif minimum
+    if (cleanSlot.length < SHIFT_MIN[shift]) {
+      alerts.push(`⚠ S${weekNum}: effectif insuffisant en ${shift} (${cleanSlot.length}/${SHIFT_MIN[shift]})`);
+    }
+    // Contrainte effectif maximum
+    if (cleanSlot.length > SHIFT_MAX[shift]) {
+      alerts.push(`⚠ S${weekNum}: sureffectif en ${shift} (${cleanSlot.length}/${SHIFT_MAX[shift]})`);
+    }
   });
 
-  // Vérification contraintes N4
-  ["matin","am","nuit"].forEach(shift=>{
-    if(!slots[shift].map(s=>s.replace(/^[↺⚠]/,"")).some(s=>n4ops.includes(s)))
-      alerts.push(`S${weekNum}: ⚠ aucun N4 en ${shift}`);
+  // Alertes absences partielles (informatif)
+  weekAbsPartial.forEach(entry => {
+    const [short,, dayLabel] = entry.split("|");
+    alerts.push(`ℹ S${weekNum}: ${short} absent le ${dayLabel}`);
   });
 
-  // Déséquilibre nuits consécutives (info)
-  return { week:weekNum, slots, alerts };
+  return { week: weekNum, slots, alerts };
+}
+
+// Détection nuits consécutives
+function detectConsecutiveNights(schedules) {
+  const alerts = [];
+  const byOp = {};
+  schedules.forEach(s => {
+    s.slots.nuit.forEach(n => {
+      const clean = n.replace(/^[↺⚠]/, "");
+      if (!byOp[clean]) byOp[clean] = [];
+      byOp[clean].push(s.week);
+    });
+  });
+  Object.entries(byOp).forEach(([op, weeks]) => {
+    const sorted = [...weeks].sort((a,b) => a-b);
+    for (let i = 0; i < sorted.length - 1; i++) {
+      if (sorted[i+1] === sorted[i] + 1) {
+        alerts.push(`⚠ ${op}: nuits consécutives S${sorted[i]} et S${sorted[i+1]}`);
+      }
+    }
+  });
+  return alerts;
 }
 
 function LevelBadge({ level }) {
-  const s=LEVEL_BADGE[level]||LEVEL_BADGE.N1;
+  const s = LEVEL_BADGE[level] || LEVEL_BADGE.N1;
   return <span style={{background:s.bg,color:s.color,borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:500}}>{level}</span>;
 }
 
 function OpChip({ name, operators, draggable, onDragStart, highlight }) {
-  const clean=name.replace(/^[↺⚠]/,""), marker=name!==clean?name[0]:"";
-  const op=operators.find(o=>o.short===clean);
-  const s=LEVEL_BADGE[op?.level||"N1"];
+  const clean = name.replace(/^[↺⚠]/, ""), marker = name !== clean ? name[0] : "";
+  const op = operators.find(o => o.short === clean);
+  const s = LEVEL_BADGE[op?.level || "N1"];
   return (
-    <span draggable={draggable} onDragStart={onDragStart}
-      title={op?.full||clean}
+    <span draggable={draggable} onDragStart={onDragStart} title={op?.full || clean}
       style={{display:"inline-flex",alignItems:"center",gap:3,
-        background: highlight?"#FFF176":s.bg,
-        color:s.color, borderRadius:4, padding:"2px 7px",
-        fontSize:12, margin:"2px", fontWeight:500,
+        background:highlight?"#FFF176":s.bg, color:s.color,
+        borderRadius:4, padding:"2px 7px", fontSize:12, margin:"2px", fontWeight:500,
         cursor:draggable?"grab":"default",
-        outline: highlight?"2px solid #F9A825":"none",
-        transition:"background 0.2s"}}>
-      {marker&&<span style={{fontSize:11}}>{marker}</span>}{clean}
+        outline:highlight?"2px solid #F9A825":"none"}}>
+      {marker && <span style={{fontSize:11}}>{marker}</span>}{clean}
     </span>
   );
 }
@@ -206,53 +274,53 @@ export default function App() {
   const [operators, setOperators] = useState(DEFAULT_OPERATORS);
   const [absences, setAbsences] = useState({});
   const [leaves, setLeaves] = useState({});
-  const [overrides, setOverrides] = useState({});
+  const [overrides, setOverrides] = useState({});        // glissements ponctuels (non sauvegardés dans algo)
+  const [pinnedOverrides, setPinnedOverrides] = useState({}); // contraintes fixes pour Générer
   const [satWeeks, setSatWeeks] = useState([]);
   const [notes, setNotes] = useState({});
   const [cycleDir, setCycleDir] = useState("matin-am-nuit");
+  const [year, setYear] = useState(2026);
   const [history, setHistory] = useState([]);
   const [startWeek, setStartWeek] = useState(22);
   const [numWeeks, setNumWeeks] = useState(5);
   const [view, setView] = useState("liste");
   const [showFullNames, setShowFullNames] = useState(false);
   const [highlightOp, setHighlightOp] = useState(null);
-  // absence form
-  const [absOp, setAbsOp] = useState(""); const [absWeek, setAbsWeek] = useState(22);
-  const [absDay, setAbsDay] = useState(0); // 0 = semaine complète
-  // leave form
-  const [leaveOp, setLeaveOp] = useState("");
-  const [leaveFrom, setLeaveFrom] = useState(22); const [leaveTo, setLeaveTo] = useState(22);
+  const [absOp, setAbsOp] = useState(""); const [absWeek, setAbsWeek] = useState(22); const [absDay, setAbsDay] = useState(0);
+  const [leaveOp, setLeaveOp] = useState(""); const [leaveFrom, setLeaveFrom] = useState(22); const [leaveTo, setLeaveTo] = useState(22);
   const [leaveFromDay, setLeaveFromDay] = useState(1); const [leaveToDay, setLeaveToDay] = useState(5);
-  // equipe form
   const [showAddOp, setShowAddOp] = useState(false);
   const [newOp, setNewOp] = useState({prenom:"",nom:"",level:"N1"});
-  // UI
   const [syncMsg, setSyncMsg] = useState("Chargement...");
   const [flashMsg, setFlashMsg] = useState(null);
   const [schedules, setSchedules] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const dragRef = useRef(null);
+
   const weeks = Array.from({length:numWeeks},(_,i)=>startWeek+i);
-  const currentWeek = getCurrentWeek();
+  const currentWeek = getCurrentWeek(year);
 
   const flash = (msg, color="#2e7d32") => {
-    setFlashMsg({msg, color});
+    setFlashMsg({msg,color});
     setTimeout(()=>setFlashMsg(null), 2500);
   };
 
+  // ── CHARGEMENT ──
   useEffect(()=>{
     (async()=>{
       try {
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,sw,nt,cy,hi] = await Promise.all([
+        const [ops,abs,lv,ov,sw,nt,cy,hi,yr,po] = await Promise.all([
           sbGetOps(), sbGet("absences"), sbGet("leaves"), sbGet("overrides"),
-          sbGet("satweeks"), sbGet("notes"), sbGet("cycle_direction"), sbGet("history"),
+          sbGet("satweeks"), sbGet("notes"), sbGet("cycle_direction"),
+          sbGet("history"), sbGet("year"), sbGet("pinned_overrides"),
         ]);
-        if(ops&&ops.length>0) setOperators(ops);
-        if(abs) setAbsences(abs); if(lv) setLeaves(lv);
-        if(ov) setOverrides(ov); if(sw) setSatWeeks(sw);
-        if(nt) setNotes(nt); if(cy) setCycleDir(cy);
-        if(hi) setHistory(hi);
+        if (ops && ops.length > 0) setOperators(ops);
+        if (abs) setAbsences(abs); if (lv) setLeaves(lv);
+        if (ov) setOverrides(ov); if (sw) setSatWeeks(sw);
+        if (nt) setNotes(nt); if (cy) setCycleDir(cy);
+        if (hi) setHistory(hi); if (yr) setYear(Number(yr));
+        if (po) setPinnedOverrides(po);
         setSyncMsg("Synchronisé ✓");
       } catch(e) { setSyncMsg(`Erreur: ${e.message}`); }
       finally { setLoaded(true); }
@@ -261,12 +329,11 @@ export default function App() {
 
   const pushHistory = useCallback((label, state) => {
     setHistory(prev => {
-      const entry = { label, ts: Date.now(), state };
-      const next = [entry, ...prev].slice(0, 10);
-      sbSet("history", next);
+      const next = [{label,ts:Date.now(),state},...prev].slice(0,10);
+      sbSet("history",next);
       return next;
     });
-  }, []);
+  },[]);
 
   const save = useCallback(async(k,v)=>{
     setSyncMsg("Enreg...");
@@ -274,50 +341,64 @@ export default function App() {
     catch { setSyncMsg("Erreur sync"); }
   },[]);
 
-  const saveOperators = useCallback(v=>{
-    pushHistory("Équipe modifiée", {operators:v});
-    setOperators(v); sbSetOps(v).then(()=>setSyncMsg("Synchronisé ✓")).catch(()=>setSyncMsg("Erreur sync"));
-  },[pushHistory]);
-  const saveAbsences  = useCallback(v=>{ setAbsences(v);  save("absences",v);  },[save]);
-  const saveLeaves    = useCallback(v=>{ setLeaves(v);     save("leaves",v);    },[save]);
-  const saveOverrides = useCallback(v=>{ setOverrides(v);  save("overrides",v); },[save]);
-  const saveSatWeeks  = useCallback(v=>{ setSatWeeks(v);   save("satweeks",v);  },[save]);
-  const saveNotes     = useCallback(v=>{ setNotes(v);      save("notes",v);     },[save]);
-  const saveCycleDir  = useCallback(v=>{ setCycleDir(v);   save("cycle_direction",v); },[save]);
+  const saveOperators   = useCallback(v=>{setOperators(v);sbSetOps(v).then(()=>setSyncMsg("Synchronisé ✓")).catch(()=>setSyncMsg("Erreur sync"));},[]);
+  const saveAbsences    = useCallback(v=>{setAbsences(v);   save("absences",v);          },[save]);
+  const saveLeaves      = useCallback(v=>{setLeaves(v);     save("leaves",v);             },[save]);
+  const saveOverrides   = useCallback(v=>{setOverrides(v);  save("overrides",v);          },[save]);
+  const savePinned      = useCallback(v=>{setPinnedOverrides(v); save("pinned_overrides",v);},[save]);
+  const saveSatWeeks    = useCallback(v=>{setSatWeeks(v);   save("satweeks",v);           },[save]);
+  const saveNotes       = useCallback(v=>{setNotes(v);      save("notes",v);              },[save]);
+  const saveCycleDir    = useCallback(v=>{setCycleDir(v);   save("cycle_direction",v);    },[save]);
+  const saveYear        = useCallback(v=>{setYear(v);       save("year",String(v));        },[save]);
 
   const activeOps = operators.filter(o=>o.active);
 
-  const buildSchedules = useCallback((ops, abs, lv, ov, cy, wks) => {
-    const base = wks.map(w=>computeSchedule(w,ops,abs,lv,cy));
-    return base.map(s=>{
-      const mk=sh=>ov[`${s.week}-${sh}`]||s.slots[sh];
-      return {...s, slots:{matin:mk("matin"),am:mk("am"),nuit:mk("nuit")}};
-    });
+  // ── CONSTRUCTION DES SCHEDULES ──
+  // Mode "algo pur" : respecte les pinnedOverrides comme contraintes, ignore les overrides ponctuels
+  const buildFromAlgo = useCallback((ops,abs,lv,cy,po,wks) => {
+    return wks.map(w => computeSchedule(w,ops,abs,lv,cy,po));
   },[]);
 
+  // Mode "avec overrides ponctuels" : applique les glissements manuels par-dessus l'algo
+  const buildWithOverrides = useCallback((ops,abs,lv,cy,po,ov,wks) => {
+    const base = buildFromAlgo(ops,abs,lv,cy,po,wks);
+    return base.map(s => {
+      const mk = sh => ov[`${s.week}-${sh}`] || s.slots[sh];
+      return {...s, slots:{matin:mk("matin"),am:mk("am"),nuit:mk("nuit")}};
+    });
+  },[buildFromAlgo]);
+
+  // Générer = recalcul algo pur + pinnedOverrides (efface les glissements ponctuels)
   const generate = useCallback(()=>{
-    const s = buildSchedules(operators,absences,leaves,overrides,cycleDir,weeks);
+    pushHistory("Génération planning", {overrides, pinnedOverrides});
+    // On efface les overrides ponctuels et on repart de l'algo avec les contraintes fixes
+    saveOverrides({});
+    const s = buildFromAlgo(operators,absences,leaves,cycleDir,pinnedOverrides,weeks);
     setSchedules(s);
-    flash("Planning généré ✓");
-  },[operators,absences,leaves,overrides,cycleDir,weeks,buildSchedules]);
+    flash("Planning régénéré ✓ (glissements manuels effacés)");
+  },[operators,absences,leaves,cycleDir,pinnedOverrides,weeks,buildFromAlgo,overrides,pushHistory,saveOverrides]);
 
-  useEffect(()=>{ if(loaded) generate(); },[loaded,startWeek,numWeeks,operators,absences,leaves,cycleDir]);
+  // Chargement initial et changements de paramètres : on applique overrides ponctuels par-dessus
+  useEffect(()=>{
+    if(!loaded) return;
+    const s = buildWithOverrides(operators,absences,leaves,cycleDir,pinnedOverrides,overrides,weeks);
+    setSchedules(s);
+  },[loaded,startWeek,numWeeks,operators,absences,leaves,cycleDir,pinnedOverrides,overrides,year]);
 
-  const allAlerts = schedules.flatMap(s=>s.alerts);
+  const consecutiveAlerts = detectConsecutiveNights(schedules);
+  const allAlerts = [...schedules.flatMap(s=>s.alerts), ...consecutiveAlerts];
 
-  // Absences
+  // ── ABSENCES ──
   const addAbsence=()=>{
     if(!absOp) return;
-    pushHistory(`Absence ajoutée: ${absOp} S${absWeek}`, {absences});
-    let entry;
-    if(absDay===0) {
-      entry = absOp; // semaine complète
-    } else {
-      entry = `${absOp}|${absWeek}|${DAYS_FR[absDay]}`; // partielle
-    }
-    const cur = (absences[absWeek]||[]).filter(e=>!e.startsWith(absOp));
+    pushHistory(`Absence: ${absOp} S${absWeek}`, {absences});
+    const entry = absDay===0 ? absOp : `${absOp}|${absWeek}|${DAYS_FR[absDay]}`;
+    const cur = (absences[absWeek]||[]).filter(e=>{
+      const s = e.includes("|")?e.split("|")[0]:e;
+      return !(s===absOp && (absDay===0?!e.includes("|"):e.includes("|")));
+    });
     saveAbsences({...absences,[absWeek]:[...cur,entry]});
-    flash(`Absence ajoutée pour ${absOp}`);
+    flash(`Absence ajoutée: ${absOp}`);
   };
   const removeAbsence=(week,entry)=>{
     const cur=(absences[week]||[]).filter(e=>e!==entry);
@@ -325,6 +406,7 @@ export default function App() {
     saveAbsences(next);
   };
 
+  // ── CONGÉS ──
   const leaveShort=e=>e.includes(":")?e.split(":")[0]:e;
   const leaveLabel=e=>{
     if(!e.includes(":")) return "Semaine complète";
@@ -332,20 +414,18 @@ export default function App() {
     const [s,en]=range.split("-").map(Number);
     return `${DAYS_FR[s]} – ${DAYS_FR[en]}`;
   };
-
   const addLeave=()=>{
     if(!leaveOp) return;
-    pushHistory(`Congé ajouté: ${leaveOp}`, {leaves});
+    pushHistory(`Congé: ${leaveOp}`, {leaves});
     const next={...leaves};
     for(let w=leaveFrom;w<=leaveTo;w++){
       const isFirst=w===leaveFrom, isLast=w===leaveTo;
-      let startD=isFirst?leaveFromDay:1, endD=isLast?leaveToDay:5;
+      const startD=isFirst?leaveFromDay:1, endD=isLast?leaveToDay:5;
       const entry=(startD===1&&endD>=5)?leaveOp:`${leaveOp}:${startD}-${endD}`;
-      const cur=next[w]||[];
-      next[w]=[...cur.filter(e=>e!==leaveOp&&!e.startsWith(`${leaveOp}:`)),entry];
+      next[w]=[...(next[w]||[]).filter(e=>e!==leaveOp&&!e.startsWith(`${leaveOp}:`)),entry];
     }
     saveLeaves(next);
-    flash(`Congé ajouté pour ${leaveOp}`);
+    flash(`Congé ajouté: ${leaveOp}`);
   };
   const removeLeaveEntry=(week,entry)=>{
     const cur=(leaves[week]||[]).filter(e=>e!==entry);
@@ -353,37 +433,47 @@ export default function App() {
     saveLeaves(next);
   };
 
-  // Drag & Drop
+  // ── DRAG & DROP ──
   const onDragStart=(weekNum,shift,name)=>{ dragRef.current={weekNum,shift,name}; };
   const onDrop=(weekNum,targetShift)=>{
     const src=dragRef.current;
     if(!src||src.weekNum!==weekNum||src.shift===targetShift) return;
     const srcSlot=schedules.find(s=>s.week===weekNum)?.slots[src.shift]||[];
     const tgtSlot=schedules.find(s=>s.week===weekNum)?.slots[targetShift]||[];
-    const nSrc=srcSlot.filter(n=>n!==src.name), nTgt=[...tgtSlot,src.name];
-    pushHistory(`Glissement: ${src.name} S${weekNum} ${src.shift}→${targetShift}`, {overrides});
-    const ov={...overrides,[`${weekNum}-${src.shift}`]:nSrc,[`${weekNum}-${targetShift}`]:nTgt};
-    saveOverrides(ov);
+    // Vérifier capacité max
+    if(tgtSlot.length>=SHIFT_MAX[targetShift]){
+      flash(`❌ Poste ${targetShift} déjà complet (max ${SHIFT_MAX[targetShift]})`, "#c62828");
+      dragRef.current=null; return;
+    }
+    const cleanName = src.name.replace(/^[↺⚠]/,"");
+    const nSrc=srcSlot.filter(n=>n!==src.name), nTgt=[...tgtSlot,cleanName];
+    pushHistory(`Glissement: ${cleanName} S${weekNum} ${src.shift}→${targetShift}`, {overrides,pinnedOverrides});
+    const newOv={...overrides,[`${weekNum}-${src.shift}`]:nSrc,[`${weekNum}-${targetShift}`]:nTgt};
+    saveOverrides(newOv);
+    // Mémoriser comme contrainte fixe (pinned)
+    const newPinned={...pinnedOverrides,[`${weekNum}-${cleanName}`]:targetShift};
+    savePinned(newPinned);
     setSchedules(prev=>prev.map(s=>s.week!==weekNum?s:{...s,slots:{...s.slots,[src.shift]:nSrc,[targetShift]:nTgt}}));
-    flash(`${src.name} déplacé vers ${targetShift}`);
+    flash(`${cleanName} → ${targetShift} (contrainte mémorisée)`);
     dragRef.current=null;
   };
 
-  // Retour arrière
+  // ── RETOUR ARRIÈRE ──
   const undoLast=()=>{
     if(!history.length) return;
-    const last=history[0];
-    const st=last.state;
-    if(st.operators) { setOperators(st.operators); sbSetOps(st.operators); }
-    if(st.absences)  { setAbsences(st.absences);   save("absences",st.absences); }
-    if(st.leaves)    { setLeaves(st.leaves);         save("leaves",st.leaves); }
-    if(st.overrides) { setOverrides(st.overrides);   save("overrides",st.overrides); }
+    const last=history[0], st=last.state;
+    if(st.operators){ setOperators(st.operators); sbSetOps(st.operators); }
+    if(st.absences) { setAbsences(st.absences);   save("absences",st.absences); }
+    if(st.leaves)   { setLeaves(st.leaves);         save("leaves",st.leaves); }
+    if(st.overrides){ setOverrides(st.overrides);   save("overrides",st.overrides); }
+    if(st.pinnedOverrides){ setPinnedOverrides(st.pinnedOverrides); save("pinned_overrides",st.pinnedOverrides); }
     const newH=history.slice(1); setHistory(newH); sbSet("history",newH);
     flash(`Annulé: ${last.label}`, "#c62828");
   };
 
-  const toggleSat=(w)=>saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
+  const toggleSat=w=>saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
 
+  // ── ÉQUITÉ ──
   const equity=activeOps.map(op=>{
     let matin=0,am=0,nuit=0;
     schedules.forEach(s=>{
@@ -391,9 +481,8 @@ export default function App() {
       if(s.slots.am.some(x=>x.replace(/^[↺⚠]/,"")=== op.short)) am++;
       if(s.slots.nuit.some(x=>x.replace(/^[↺⚠]/,"")=== op.short)) nuit++;
     });
-    const nightRatio = numWeeks>0 ? nuit/numWeeks : 0;
-    const imbalance = Math.max(matin,am,nuit)-Math.min(matin,am,nuit) > numWeeks*0.4;
-    return {...op,matin,am,nuit,total:matin+am+nuit,nightRatio,imbalance};
+    const imbalance=Math.max(matin,am,nuit)-Math.min(matin,am,nuit)>numWeeks*0.4;
+    return {...op,matin,am,nuit,total:matin+am+nuit,imbalance};
   });
   const maxTotal=Math.max(...equity.map(e=>e.total),1);
 
@@ -409,9 +498,9 @@ export default function App() {
   const deleteOp=id=>{ if(window.confirm("Supprimer ?")) saveOperators(operators.filter(o=>o.id!==id)); };
 
   const shiftMeta=[
-    {key:"matin",label:"Matin",bg:"#f0faf1",hbg:"#D6EFD8",tc:"#1B5E20",thbg:"#D6EFD8"},
-    {key:"am",   label:"AM",   bg:"#fffde7",hbg:"#FFF9C4",tc:"#F57F17",thbg:"#FFF9C4"},
-    {key:"nuit", label:"Nuit", bg:"#e3f2fd",hbg:"#BBDEFB",tc:"#0D47A1",thbg:"#BBDEFB"},
+    {key:"matin",label:"Matin 5h50–14h",  bg:"#f0faf1",hbg:"#D6EFD8",tc:"#1B5E20"},
+    {key:"am",   label:"AM 13h50–22h",    bg:"#fffde7",hbg:"#FFF9C4",tc:"#F57F17"},
+    {key:"nuit", label:"Nuit 21h50–6h",   bg:"#e3f2fd",hbg:"#BBDEFB",tc:"#0D47A1"},
   ];
 
   const TABS=[
@@ -422,29 +511,20 @@ export default function App() {
     {id:"equipe",   label:"Équipe",     icon:"👥"},
   ];
 
-  const chipName = (name) => {
-    if(!showFullNames) return name;
-    const clean=name.replace(/^[↺⚠]/,""), marker=name!==clean?name[0]:"";
-    const op=operators.find(o=>o.short===clean);
-    return marker+(op?.full||clean);
-  };
-
   return (
     <div style={{fontFamily:"'DM Sans','Outfit',sans-serif",background:"#f7f8fa",minHeight:"100vh"}}>
-      {/* Flash message */}
-      {flashMsg && (
-        <div style={{position:"fixed",top:16,right:16,zIndex:9999,background:flashMsg.color,color:"#fff",padding:"10px 20px",borderRadius:8,fontSize:13,fontWeight:600,boxShadow:"0 4px 12px rgba(0,0,0,0.15)",transition:"all 0.3s"}}>
+      {flashMsg&&(
+        <div style={{position:"fixed",top:16,right:16,zIndex:9999,background:flashMsg.color,color:"#fff",padding:"10px 20px",borderRadius:8,fontSize:13,fontWeight:600,boxShadow:"0 4px 12px rgba(0,0,0,0.2)"}}>
           {flashMsg.msg}
         </div>
       )}
 
-      {/* HEADER */}
       <div style={{background:BRAND,color:"#fff",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:52,position:"sticky",top:0,zIndex:100}}>
         <span style={{fontWeight:700,fontSize:18,letterSpacing:1.5}}>NEOLITIK</span>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
-          {history.length>0 && (
+          {history.length>0&&(
             <button onClick={undoLast} title={`Annuler: ${history[0]?.label}`}
-              style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:6,cursor:"pointer",padding:"4px 10px",fontSize:12,color:"#fff",display:"flex",alignItems:"center",gap:5}}>
+              style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:6,cursor:"pointer",padding:"4px 10px",fontSize:12,color:"#fff"}}>
               ↩ Annuler
             </button>
           )}
@@ -452,12 +532,11 @@ export default function App() {
         </div>
       </div>
 
-      {/* TABS */}
       <div style={{display:"flex",borderBottom:"1px solid #e0e0e0",background:"#fff",paddingLeft:16,overflowX:"auto",position:"sticky",top:52,zIndex:99}}>
         {TABS.map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
-            style={{background:"none",border:"none",padding:"11px 14px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:tab===t.id?600:400,color:tab===t.id?BRAND:"#666",borderBottom:tab===t.id?`2px solid ${BRAND}`:"2px solid transparent",whiteSpace:"nowrap",gap:5,display:"flex",alignItems:"center"}}>
-            <span>{t.icon}</span>{t.label}
+            style={{background:"none",border:"none",padding:"11px 14px",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:tab===t.id?600:400,color:tab===t.id?BRAND:"#666",borderBottom:tab===t.id?`2px solid ${BRAND}`:"2px solid transparent",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>
+            {t.icon} {t.label}
           </button>
         ))}
       </div>
@@ -465,21 +544,28 @@ export default function App() {
       <div style={{padding:"20px 20px 60px",maxWidth:1200,margin:"0 auto"}}>
 
         {/* ── PLANNING ── */}
-        {tab==="planning" && (
+        {tab==="planning"&&(
           <div>
             {/* Barre de contrôle */}
-            <div style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center",marginBottom:16,background:"#fff",padding:"12px 16px",borderRadius:10,border:"1px solid #e0e0e0"}}>
+            <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"12px 16px",marginBottom:12,display:"flex",flexWrap:"wrap",gap:10,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <label style={{fontSize:13,color:"#555",fontWeight:500}}>Semaine de départ</label>
+                <label style={{fontSize:13,color:"#555",fontWeight:500}}>Année</label>
+                <select value={year} onChange={e=>saveYear(Number(e.target.value))}
+                  style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                  {[2025,2026,2027,2028,2029].map(y=><option key={y} value={y}>{y}</option>)}
+                </select>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <label style={{fontSize:13,color:"#555",fontWeight:500}}>Sem. départ</label>
                 <input type="number" min={1} max={52} value={startWeek} onChange={e=>setStartWeek(Number(e.target.value))}
-                  style={{width:64,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+                  style={{width:60,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:6}}>
-                <label style={{fontSize:13,color:"#555",fontWeight:500}}>Afficher</label>
                 {[3,5,10,15,26].map(n=>(
                   <button key={n} onClick={()=>setNumWeeks(n)}
                     style={{padding:"4px 10px",borderRadius:6,border:"1px solid #ccc",background:numWeeks===n?BRAND:"#fff",color:numWeeks===n?"#fff":"#333",cursor:"pointer",fontSize:13}}>{n}</button>
                 ))}
+                <span style={{fontSize:13,color:"#888"}}>sem.</span>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 <label style={{fontSize:13,color:"#555",fontWeight:500}}>Cycle</label>
@@ -488,16 +574,17 @@ export default function App() {
                   {CYCLE_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               </div>
-              <div style={{display:"flex",gap:6,marginLeft:"auto",alignItems:"center",flexWrap:"wrap"}}>
+              <div style={{display:"flex",gap:6,marginLeft:"auto",flexWrap:"wrap"}}>
                 <button onClick={generate}
-                  style={{padding:"6px 16px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>
-                  🔄 Générer
+                  style={{padding:"6px 16px",borderRadius:7,background:"#c62828",color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}
+                  title="Recalcule l'algorithme depuis zéro. Les glissements manuels sont effacés, mais les contraintes fixées (positions mémorisées) sont conservées.">
+                  🔄 Recalculer
                 </button>
                 {[{k:"liste",l:"📋 Liste"},{k:"colonnes",l:"🗂 Colonnes"}].map(v=>(
                   <button key={v.k} onClick={()=>setView(v.k)}
                     style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:view===v.k?BRAND:"#fff",color:view===v.k?"#fff":"#333",cursor:"pointer",fontSize:13}}>{v.l}</button>
                 ))}
-                <button onClick={()=>setShowFullNames(p=>!p)} title="Afficher noms complets"
+                <button onClick={()=>setShowFullNames(p=>!p)}
                   style={{padding:"5px 10px",borderRadius:6,border:"1px solid #ccc",background:showFullNames?"#e8f5e9":"#fff",cursor:"pointer",fontSize:13}}>
                   {showFullNames?"👤 Court":"👤 Complet"}
                 </button>
@@ -505,13 +592,13 @@ export default function App() {
             </div>
 
             {/* Filtre opérateur */}
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12,alignItems:"center"}}>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
               <span style={{fontSize:12,color:"#888"}}>Surligner :</span>
               <button onClick={()=>setHighlightOp(null)}
-                style={{padding:"3px 10px",borderRadius:20,border:"1px solid #ccc",background:!highlightOp?BRAND:"#fff",color:!highlightOp?"#fff":"#555",cursor:"pointer",fontSize:12}}>Tous</button>
+                style={{padding:"2px 10px",borderRadius:20,border:"1px solid #ccc",background:!highlightOp?BRAND:"#fff",color:!highlightOp?"#fff":"#555",cursor:"pointer",fontSize:12}}>Tous</button>
               {activeOps.map(o=>(
                 <button key={o.id} onClick={()=>setHighlightOp(highlightOp===o.short?null:o.short)}
-                  style={{padding:"3px 10px",borderRadius:20,border:`1px solid ${LEVEL_BADGE[o.level].bg}`,background:highlightOp===o.short?LEVEL_BADGE[o.level].bg:"#fff",color:LEVEL_BADGE[o.level].color,cursor:"pointer",fontSize:12,fontWeight:highlightOp===o.short?700:400}}>
+                  style={{padding:"2px 10px",borderRadius:20,border:`1px solid ${LEVEL_BADGE[o.level].bg}`,background:highlightOp===o.short?LEVEL_BADGE[o.level].bg:"#fff",color:LEVEL_BADGE[o.level].color,cursor:"pointer",fontSize:12,fontWeight:highlightOp===o.short?700:400}}>
                   {o.short}
                 </button>
               ))}
@@ -521,23 +608,19 @@ export default function App() {
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"12px 16px",marginBottom:12}}>
               <div style={{fontWeight:600,fontSize:13,marginBottom:8}}>Absence ponctuelle</div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                <select value={absOp} onChange={e=>setAbsOp(e.target.value)}
-                  style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                <select value={absOp} onChange={e=>setAbsOp(e.target.value)} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                   <option value="">-- Opérateur --</option>
                   {activeOps.map(o=><option key={o.id} value={o.short}>{o.full}</option>)}
                 </select>
                 <span style={{fontSize:13,color:"#555"}}>S.</span>
                 <input type="number" min={1} max={52} value={absWeek} onChange={e=>setAbsWeek(Number(e.target.value))}
-                  style={{width:60,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
-                <select value={absDay} onChange={e=>setAbsDay(Number(e.target.value))}
-                  style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                  style={{width:58,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+                <select value={absDay} onChange={e=>setAbsDay(Number(e.target.value))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                   <option value={0}>Semaine complète</option>
                   {[1,2,3,4,5].map(d=><option key={d} value={d}>{DAYS_FR[d]}</option>)}
                 </select>
-                <button onClick={addAbsence}
-                  style={{padding:"5px 14px",borderRadius:6,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>Ajouter</button>
+                <button onClick={addAbsence} style={{padding:"5px 14px",borderRadius:6,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>Ajouter</button>
               </div>
-              {/* Tags absences semaine courante */}
               <div style={{marginTop:8,display:"flex",flexWrap:"wrap",gap:5}}>
                 {Object.entries(absences).sort((a,b)=>Number(a[0])-Number(b[0])).flatMap(([week,arr])=>
                   arr.map(entry=>{
@@ -555,41 +638,42 @@ export default function App() {
             </div>
 
             {/* Alertes */}
-            {allAlerts.length>0 && (
+            {allAlerts.length>0&&(
               <div style={{background:"#fdecea",border:"1px solid #ef9a9a",borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#b71c1c"}}>
-                <strong>Alertes contraintes ({allAlerts.length}) :</strong>
+                <strong>⚠ Alertes ({allAlerts.length})</strong>
                 <ul style={{margin:"4px 0 0 16px",padding:0}}>{allAlerts.map((a,i)=><li key={i}>{a}</li>)}</ul>
               </div>
             )}
 
-            <div style={{fontSize:12,color:"#888",marginBottom:10}}>
-              💡 Glissez un opérateur d'un poste à un autre pour le déplacer manuellement. Cliquez sur "Générer" pour recalculer en conservant les glissements.
+            <div style={{fontSize:12,color:"#666",marginBottom:10,background:"#f0f4ff",border:"1px solid #c5cae9",borderRadius:7,padding:"8px 12px"}}>
+              💡 <strong>Glissement :</strong> faites glisser un opérateur vers un autre poste. Sa position est mémorisée comme contrainte fixe.<br/>
+              🔄 <strong>Recalculer :</strong> repart de zéro en respectant les contraintes mémorisées. Efface les autres glissements ponctuels.
             </div>
 
             {/* VUE LISTE */}
-            {view==="liste" && (
+            {view==="liste"&&(
               <div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",background:"#fff",borderRadius:10,overflow:"hidden",border:"1px solid #e0e0e0",fontSize:13}}>
                   <thead>
                     <tr style={{background:BRAND,color:"#fff"}}>
-                      <th style={{padding:"10px 12px",textAlign:"left"}}>Semaine</th>
-                      <th style={{padding:"10px 12px",textAlign:"left"}}>Dates</th>
-                      <th style={{padding:"10px 12px",background:"#D6EFD8",color:"#1B5E20"}}>Matin 5h50–14h</th>
-                      <th style={{padding:"10px 12px",background:"#FFF9C4",color:"#F57F17"}}>AM 13h50–22h</th>
-                      <th style={{padding:"10px 12px",background:"#BBDEFB",color:"#0D47A1"}}>Nuit 21h50–6h</th>
-                      <th style={{padding:"10px 12px",textAlign:"center",fontSize:11}}>Sam.</th>
-                      <th style={{padding:"10px 12px",textAlign:"left",fontSize:11}}>Note</th>
+                      <th style={{padding:"10px 12px",textAlign:"left",minWidth:80}}>Semaine</th>
+                      <th style={{padding:"10px 12px",textAlign:"left",minWidth:100}}>Dates</th>
+                      <th style={{padding:"10px 12px",background:"#D6EFD8",color:"#1B5E20",minWidth:140}}>Matin 5h50–14h</th>
+                      <th style={{padding:"10px 12px",background:"#FFF9C4",color:"#F57F17",minWidth:120}}>AM 13h50–22h</th>
+                      <th style={{padding:"10px 12px",background:"#BBDEFB",color:"#0D47A1",minWidth:140}}>Nuit 21h50–6h</th>
+                      <th style={{padding:"10px 12px",textAlign:"center",width:60,fontSize:11}}>Sam.</th>
+                      <th style={{padding:"10px 12px",minWidth:120,fontSize:11}}>Note</th>
                     </tr>
                   </thead>
                   <tbody>
                     {schedules.map((s,i)=>{
                       const hasSat=satWeeks.includes(s.week);
                       const isCurrent=s.week===currentWeek;
-                      const m=getMondayOfWeek(s.week), end=new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
+                      const m=getMondayOfWeek(s.week,year), end=new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
                       return (
                         <tr key={s.week} style={{borderBottom:"1px solid #f0f0f0",background:isCurrent?"#f1f8e9":i%2===0?"#fff":"#fafafa",outline:isCurrent?`2px solid ${BRAND}`:"none"}}>
                           <td style={{padding:"10px 12px",fontWeight:700,color:isCurrent?BRAND:"inherit"}}>
-                            S{s.week}{isCurrent&&<span style={{marginLeft:4,fontSize:10,background:BRAND,color:"#fff",borderRadius:3,padding:"1px 4px"}}>● Actuelle</span>}
+                            S{s.week}{isCurrent&&<span style={{marginLeft:4,fontSize:10,background:BRAND,color:"#fff",borderRadius:3,padding:"1px 4px"}}>● Now</span>}
                           </td>
                           <td style={{padding:"10px 12px",fontSize:12}}>
                             <div>{fmtDate(m)} – {fmtDate(end)}</div>
@@ -601,9 +685,9 @@ export default function App() {
                               <div style={{display:"flex",flexWrap:"wrap"}}>
                                 {s.slots[sh.key].map(n=>{
                                   const clean=n.replace(/^[↺⚠]/,"");
-                                  return <OpChip key={n} name={showFullNames?chipName(n):n} operators={operators} draggable
-                                    onDragStart={()=>onDragStart(s.week,sh.key,n)}
-                                    highlight={highlightOp&&clean===highlightOp}/>;
+                                  return <OpChip key={n} name={showFullNames?(()=>{const op=operators.find(o=>o.short===clean);return n!==clean?n[0]+(op?.full||clean):(op?.full||clean);})():n}
+                                    operators={operators} draggable onDragStart={()=>onDragStart(s.week,sh.key,n)}
+                                    highlight={!!(highlightOp&&clean===highlightOp)}/>;
                                 })}
                               </div>
                             </td>
@@ -611,13 +695,12 @@ export default function App() {
                           <td style={{padding:"8px",textAlign:"center"}}>
                             <button onClick={()=>toggleSat(s.week)}
                               style={{background:hasSat?"#fdecea":"#f5f5f5",border:`1px solid ${hasSat?"#ef9a9a":"#ccc"}`,borderRadius:6,cursor:"pointer",padding:"4px 8px",fontSize:12,color:hasSat?"#b71c1c":"#555"}}>
-                              {hasSat?"✓":"+ Sam"}
+                              {hasSat?"✓ Sam":"+ Sam"}
                             </button>
                           </td>
-                          <td style={{padding:"8px 10px",minWidth:120}}>
-                            <input value={notes[s.week]||""} onChange={e=>{const n={...notes,[s.week]:e.target.value};saveNotes(n);}}
-                              placeholder="Note…"
-                              style={{width:"100%",padding:"4px 6px",borderRadius:5,border:"1px solid #e0e0e0",fontSize:12,background:"transparent"}}/>
+                          <td style={{padding:"8px 10px"}}>
+                            <input value={notes[s.week]||""} onChange={e=>saveNotes({...notes,[s.week]:e.target.value})}
+                              placeholder="Note…" style={{width:"100%",padding:"4px 6px",borderRadius:5,border:"1px solid #e0e0e0",fontSize:12,background:"transparent"}}/>
                           </td>
                         </tr>
                       );
@@ -628,40 +711,37 @@ export default function App() {
             )}
 
             {/* VUE COLONNES */}
-            {view==="colonnes" && (
+            {view==="colonnes"&&(
               <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8}}>
                 {schedules.map(s=>{
                   const hasSat=satWeeks.includes(s.week);
                   const isCurrent=s.week===currentWeek;
-                  const m=getMondayOfWeek(s.week), end=new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
+                  const m=getMondayOfWeek(s.week,year), end=new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
                   return (
                     <div key={s.week} style={{minWidth:210,background:"#fff",border:`2px solid ${isCurrent?BRAND:"#e0e0e0"}`,borderRadius:10,overflow:"hidden",flexShrink:0}}>
                       <div style={{background:isCurrent?"#2d4828":BRAND,color:"#fff",padding:"10px 14px"}}>
                         <div style={{fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:6}}>
-                          S{s.week}{isCurrent&&<span style={{fontSize:10,background:"rgba(255,255,255,0.25)",borderRadius:3,padding:"1px 4px"}}>● Actuelle</span>}
+                          S{s.week}{isCurrent&&<span style={{fontSize:10,background:"rgba(255,255,255,0.25)",borderRadius:3,padding:"1px 4px"}}>● Now</span>}
                         </div>
-                        <div style={{fontSize:11,opacity:.7}}>{fmtDate(m)} – {fmtDate(end)}</div>
-                        {hasSat&&<div style={{fontSize:10,background:"#c62828",borderRadius:3,padding:"1px 5px",marginTop:3,display:"inline-block"}}>⚠ Sam.</div>}
-                        <div style={{display:"flex",gap:4,marginTop:4}}>
-                          <button onClick={()=>toggleSat(s.week)}
-                            style={{background:"rgba(255,255,255,0.2)",border:"1px solid rgba(255,255,255,0.4)",borderRadius:4,cursor:"pointer",padding:"2px 8px",fontSize:11,color:"#fff"}}>
-                            {hasSat?"- Sam":"+ Sam"}
-                          </button>
+                        <div style={{fontSize:11,opacity:.75}}>{fmtDate(m)} – {fmtDate(end)}{hasSat&&<span style={{marginLeft:6,background:"#c62828",borderRadius:3,padding:"1px 5px",fontSize:10}}>⚠ Sam.</span>}</div>
+                        {/* Bouton Sam visible uniquement au survol via CSS inline trick */}
+                        <div className="sat-toggle" style={{marginTop:4,opacity:0.6,fontSize:11,cursor:"pointer",textDecoration:"underline"}}
+                          onClick={()=>toggleSat(s.week)}>
+                          {hasSat?"Retirer samedi":"+ Samedi travaillé"}
                         </div>
-                        <input value={notes[s.week]||""} onChange={e=>{const n={...notes,[s.week]:e.target.value};saveNotes(n);}}
-                          placeholder="Note semaine…"
-                          style={{marginTop:6,width:"100%",padding:"3px 6px",borderRadius:4,border:"1px solid rgba(255,255,255,0.3)",fontSize:11,background:"rgba(255,255,255,0.1)",color:"#fff"}}/>
+                        <input value={notes[s.week]||""} onChange={e=>saveNotes({...notes,[s.week]:e.target.value})}
+                          placeholder="Note…" style={{marginTop:5,width:"100%",padding:"3px 6px",borderRadius:4,border:"1px solid rgba(255,255,255,0.3)",fontSize:11,background:"rgba(255,255,255,0.1)",color:"#fff"}}/>
                       </div>
                       {shiftMeta.map(sh=>(
                         <div key={sh.key} style={{background:sh.hbg,padding:"8px 10px",borderBottom:"1px solid rgba(0,0,0,0.06)"}}
                           onDragOver={e=>e.preventDefault()} onDrop={()=>onDrop(s.week,sh.key)}>
-                          <div style={{fontSize:11,fontWeight:600,color:sh.tc,marginBottom:4}}>{sh.label}</div>
+                          <div style={{fontSize:11,fontWeight:600,color:sh.tc,marginBottom:4}}>{sh.label.split(" ")[0]}</div>
                           <div style={{display:"flex",flexWrap:"wrap"}}>
                             {s.slots[sh.key].map(n=>{
                               const clean=n.replace(/^[↺⚠]/,"");
-                              return <OpChip key={n} name={showFullNames?chipName(n):n} operators={operators} draggable
-                                onDragStart={()=>onDragStart(s.week,sh.key,n)}
-                                highlight={highlightOp&&clean===highlightOp}/>;
+                              return <OpChip key={n} name={showFullNames?(()=>{const op=operators.find(o=>o.short===clean);return n!==clean?n[0]+(op?.full||clean):(op?.full||clean);})():n}
+                                operators={operators} draggable onDragStart={()=>onDragStart(s.week,sh.key,n)}
+                                highlight={!!(highlightOp&&clean===highlightOp)}/>;
                             })}
                           </div>
                         </div>
@@ -675,48 +755,31 @@ export default function App() {
         )}
 
         {/* ── CONGÉS ── */}
-        {tab==="conges" && (
+        {tab==="conges"&&(
           <div>
             <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Gestion des congés</div>
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"16px 18px",marginBottom:20}}>
               <div style={{fontWeight:600,fontSize:13,marginBottom:12}}>Déclarer des congés</div>
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-                <div>
-                  <div style={{fontSize:12,color:"#666",marginBottom:4}}>Opérateur</div>
-                  <select value={leaveOp} onChange={e=>setLeaveOp(e.target.value)}
-                    style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                <div><div style={{fontSize:12,color:"#666",marginBottom:4}}>Opérateur</div>
+                  <select value={leaveOp} onChange={e=>setLeaveOp(e.target.value)} style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                     <option value="">-- Choisir --</option>
                     {activeOps.map(o=><option key={o.id} value={o.short}>{o.full}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <div style={{fontSize:12,color:"#666",marginBottom:4}}>Sem. début</div>
-                  <input type="number" min={1} max={52} value={leaveFrom} onChange={e=>setLeaveFrom(Number(e.target.value))}
-                    style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
-                </div>
-                <div>
-                  <div style={{fontSize:12,color:"#666",marginBottom:4}}>Jour début</div>
-                  <select value={leaveFromDay} onChange={e=>setLeaveFromDay(Number(e.target.value))}
-                    style={{padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                  </select></div>
+                <div><div style={{fontSize:12,color:"#666",marginBottom:4}}>Sem. début</div>
+                  <input type="number" min={1} max={52} value={leaveFrom} onChange={e=>setLeaveFrom(Number(e.target.value))} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/></div>
+                <div><div style={{fontSize:12,color:"#666",marginBottom:4}}>Jour début</div>
+                  <select value={leaveFromDay} onChange={e=>setLeaveFromDay(Number(e.target.value))} style={{padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                     {[1,2,3,4,5].map(d=><option key={d} value={d}>{DAYS_FR[d]}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <div style={{fontSize:12,color:"#666",marginBottom:4}}>Sem. fin</div>
-                  <input type="number" min={1} max={52} value={leaveTo} onChange={e=>setLeaveTo(Number(e.target.value))}
-                    style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
-                </div>
-                <div>
-                  <div style={{fontSize:12,color:"#666",marginBottom:4}}>Jour fin</div>
-                  <select value={leaveToDay} onChange={e=>setLeaveToDay(Number(e.target.value))}
-                    style={{padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                  </select></div>
+                <div><div style={{fontSize:12,color:"#666",marginBottom:4}}>Sem. fin</div>
+                  <input type="number" min={1} max={52} value={leaveTo} onChange={e=>setLeaveTo(Number(e.target.value))} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/></div>
+                <div><div style={{fontSize:12,color:"#666",marginBottom:4}}>Jour fin</div>
+                  <select value={leaveToDay} onChange={e=>setLeaveToDay(Number(e.target.value))} style={{padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                     {[1,2,3,4,5].map(d=><option key={d} value={d}>{DAYS_FR[d]}</option>)}
-                  </select>
-                </div>
-                <button onClick={addLeave}
-                  style={{padding:"7px 18px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>Ajouter</button>
+                  </select></div>
+                <button onClick={addLeave} style={{padding:"7px 18px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>Ajouter</button>
               </div>
-              <div style={{fontSize:12,color:"#888",marginTop:8}}>Semaine complète = Lun → Ven. Les semaines complètes génèrent un remplacement automatique dans le planning.</div>
             </div>
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden"}}>
               <div style={{padding:"12px 16px",borderBottom:"1px solid #f0f0f0",fontWeight:600,fontSize:13,background:"#f9f9f9"}}>Congés planifiés</div>
@@ -737,7 +800,7 @@ export default function App() {
                       </div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
                         {[...items].sort((a,b)=>a.week-b.week).map(({week,entry})=>{
-                          const m=getMondayOfWeek(week),lbl=leaveLabel(entry),isFull=lbl==="Semaine complète";
+                          const m=getMondayOfWeek(week,year),lbl=leaveLabel(entry),isFull=lbl==="Semaine complète";
                           return (
                             <span key={`${week}-${entry}`} style={{background:isFull?"#e8f5e9":"#fff8e1",color:isFull?"#2e7d32":"#f57f17",borderRadius:20,padding:"3px 10px",fontSize:12,display:"flex",alignItems:"center",gap:5,border:`1px solid ${isFull?"#a5d6a7":"#ffe082"}`}}>
                               <strong>S{week}</strong> · {fmtDate(m)} · {lbl}
@@ -754,27 +817,25 @@ export default function App() {
           </div>
         )}
 
-        {/* ── HISTORIQUE ABSENCES ── */}
-        {tab==="absences" && (
+        {/* ── HISTORIQUE ── */}
+        {tab==="absences"&&(
           <div>
-            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Historique des absences ponctuelles</div>
-            {Object.keys(absences).length===0&&<div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"24px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune absence enregistrée</div>}
+            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Historique absences ponctuelles</div>
+            {Object.keys(absences).length===0&&<div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"24px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune absence</div>}
             {Object.keys(absences).length>0&&(
-              <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden"}}>
+              <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden",marginBottom:24}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                  <thead>
-                    <tr style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0"}}>
-                      <th style={{padding:"10px 14px",textAlign:"left"}}>Semaine</th>
-                      <th style={{padding:"10px 14px",textAlign:"left"}}>Dates</th>
-                      <th style={{padding:"10px 14px",textAlign:"left"}}>Absences</th>
-                      <th style={{padding:"10px 14px",textAlign:"center",width:80}}>Actions</th>
-                    </tr>
-                  </thead>
+                  <thead><tr style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0"}}>
+                    <th style={{padding:"10px 14px",textAlign:"left"}}>Semaine</th>
+                    <th style={{padding:"10px 14px",textAlign:"left"}}>Dates</th>
+                    <th style={{padding:"10px 14px",textAlign:"left"}}>Absences</th>
+                    <th style={{padding:"10px 14px",textAlign:"center",width:80}}>Actions</th>
+                  </tr></thead>
                   <tbody>
                     {Object.entries(absences).sort((a,b)=>Number(a[0])-Number(b[0])).map(([week,arr],i)=>(
                       <tr key={week} style={{borderBottom:"1px solid #f0f0f0",background:i%2===0?"#fff":"#fafafa"}}>
                         <td style={{padding:"10px 14px",fontWeight:600}}>S{week}</td>
-                        <td style={{padding:"10px 14px",fontSize:12,color:"#666"}}>{formatWeekDates(Number(week))}</td>
+                        <td style={{padding:"10px 14px",fontSize:12,color:"#666"}}>{formatWeekDates(Number(week),year)}</td>
                         <td style={{padding:"10px 14px"}}>
                           <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
                             {arr.map(entry=>{
@@ -785,7 +846,7 @@ export default function App() {
                               return (
                                 <span key={entry} style={{display:"inline-flex",alignItems:"center",gap:5,background:isPartial?"#fff8e1":"#fdecea",color:isPartial?"#f57f17":"#b71c1c",borderRadius:20,padding:"3px 10px",fontSize:12}}>
                                   <span style={{background:s.bg,color:s.color,borderRadius:3,padding:"0 4px",fontSize:10,fontWeight:600}}>{lv}</span>
-                                  {short}{isPartial?` — ${dayLbl}`:" (semaine)"}
+                                  {short}{isPartial?` — ${dayLbl}`:" (sem.)"}
                                   <button onClick={()=>removeAbsence(Number(week),entry)} style={{background:"none",border:"none",cursor:"pointer",color:"inherit",padding:0,fontSize:14}}>×</button>
                                 </span>
                               );
@@ -793,8 +854,7 @@ export default function App() {
                           </div>
                         </td>
                         <td style={{padding:"10px 14px",textAlign:"center"}}>
-                          <button onClick={()=>{const n={...absences};delete n[week];saveAbsences(n);}}
-                            style={{padding:"3px 10px",borderRadius:5,border:"1px solid #ccc",background:"#f5f5f5",cursor:"pointer",fontSize:12,color:"#555"}}>Vider</button>
+                          <button onClick={()=>{const n={...absences};delete n[week];saveAbsences(n);}} style={{padding:"3px 10px",borderRadius:5,border:"1px solid #ccc",background:"#f5f5f5",cursor:"pointer",fontSize:12}}>Vider</button>
                         </td>
                       </tr>
                     ))}
@@ -802,10 +862,8 @@ export default function App() {
                 </table>
               </div>
             )}
-
-            {/* Historique actions */}
-            <div style={{marginTop:24,fontWeight:600,fontSize:15,marginBottom:14}}>Historique des actions (retour arrière)</div>
-            {history.length===0&&<div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"20px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune action enregistrée</div>}
+            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Historique des actions</div>
+            {history.length===0&&<div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"20px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune action</div>}
             {history.length>0&&(
               <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden"}}>
                 {history.map((h,i)=>(
@@ -823,22 +881,20 @@ export default function App() {
         )}
 
         {/* ── ÉQUITÉ ── */}
-        {tab==="equite" && (
+        {tab==="equite"&&(
           <div>
-            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Équité — S{startWeek} à S{startWeek+numWeeks-1}</div>
+            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Équité — S{startWeek} à S{startWeek+numWeeks-1} ({year})</div>
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden"}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                <thead>
-                  <tr style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0"}}>
-                    <th style={{padding:"10px 14px",textAlign:"left"}}>Opérateur</th>
-                    <th style={{padding:"10px 14px",textAlign:"left"}}>Niveau</th>
-                    <th style={{padding:"10px 14px",textAlign:"center",color:"#1B5E20"}}>Matin</th>
-                    <th style={{padding:"10px 14px",textAlign:"center",color:"#F57F17"}}>AM</th>
-                    <th style={{padding:"10px 14px",textAlign:"center",color:"#0D47A1"}}>Nuit</th>
-                    <th style={{padding:"10px 14px",textAlign:"center"}}>Total</th>
-                    <th style={{padding:"10px 14px",textAlign:"center"}}>Équilibre</th>
-                  </tr>
-                </thead>
+                <thead><tr style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0"}}>
+                  <th style={{padding:"10px 14px",textAlign:"left"}}>Opérateur</th>
+                  <th style={{padding:"10px 14px",textAlign:"left"}}>Niveau</th>
+                  <th style={{padding:"10px 14px",textAlign:"center",color:"#1B5E20"}}>Matin</th>
+                  <th style={{padding:"10px 14px",textAlign:"center",color:"#F57F17"}}>AM</th>
+                  <th style={{padding:"10px 14px",textAlign:"center",color:"#0D47A1"}}>Nuit</th>
+                  <th style={{padding:"10px 14px",textAlign:"center"}}>Total</th>
+                  <th style={{padding:"10px 14px",textAlign:"center"}}>Équilibre</th>
+                </tr></thead>
                 <tbody>
                   {equity.map((op,i)=>(
                     <tr key={op.id} style={{borderBottom:"1px solid #f0f0f0",background:op.imbalance?"#fff8e1":i%2===0?"#fff":"#fafafa"}}>
@@ -847,7 +903,7 @@ export default function App() {
                       {[{k:"matin",bg:"#D6EFD8",tc:"#1B5E20"},{k:"am",bg:"#FFF9C4",tc:"#F57F17"},{k:"nuit",bg:"#BBDEFB",tc:"#0D47A1"}].map(sh=>(
                         <td key={sh.k} style={{padding:"8px 14px",textAlign:"center"}}>
                           <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
-                            <div style={{width:Math.round((op[sh.k]/numWeeks)*60),height:8,background:sh.bg,borderRadius:4,minWidth:2}}/>
+                            <div style={{width:Math.round((op[sh.k]/Math.max(numWeeks,1))*60),height:8,background:sh.bg,borderRadius:4,minWidth:2}}/>
                             <span style={{color:sh.tc,fontWeight:600}}>{op[sh.k]}</span>
                           </div>
                         </td>
@@ -860,8 +916,8 @@ export default function App() {
                       </td>
                       <td style={{padding:"8px 14px",textAlign:"center"}}>
                         {op.imbalance
-                          ? <span style={{background:"#fff3e0",color:"#e65100",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:600}}>⚠ Déséquilibre</span>
-                          : <span style={{background:"#e8f5e9",color:"#2e7d32",borderRadius:4,padding:"2px 8px",fontSize:11}}>✓ OK</span>}
+                          ?<span style={{background:"#fff3e0",color:"#e65100",borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:600}}>⚠ Déséquilibre</span>
+                          :<span style={{background:"#e8f5e9",color:"#2e7d32",borderRadius:4,padding:"2px 8px",fontSize:11}}>✓ OK</span>}
                       </td>
                     </tr>
                   ))}
@@ -872,31 +928,22 @@ export default function App() {
         )}
 
         {/* ── ÉQUIPE ── */}
-        {tab==="equipe" && (
+        {tab==="equipe"&&(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
               <div style={{fontWeight:600,fontSize:15}}>Équipe ({operators.length} opérateurs)</div>
-              <button onClick={()=>setShowAddOp(!showAddOp)}
-                style={{display:"flex",alignItems:"center",gap:6,padding:"6px 14px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>
-                + Ajouter
-              </button>
+              <button onClick={()=>setShowAddOp(!showAddOp)} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 14px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>+ Ajouter</button>
             </div>
             {showAddOp&&(
               <div style={{background:"#fff",border:"1px solid #e0e0e0",borderRadius:10,padding:16,marginBottom:14,display:"flex",flexWrap:"wrap",gap:10,alignItems:"flex-end"}}>
                 {[{label:"Prénom",key:"prenom",w:120},{label:"NOM",key:"nom",w:120}].map(f=>(
-                  <div key={f.key}>
-                    <div style={{fontSize:12,color:"#666",marginBottom:4}}>{f.label}</div>
-                    <input value={newOp[f.key]} onChange={e=>setNewOp({...newOp,[f.key]:e.target.value})} placeholder={f.label}
-                      style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13,width:f.w}}/>
-                  </div>
+                  <div key={f.key}><div style={{fontSize:12,color:"#666",marginBottom:4}}>{f.label}</div>
+                    <input value={newOp[f.key]} onChange={e=>setNewOp({...newOp,[f.key]:e.target.value})} placeholder={f.label} style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13,width:f.w}}/></div>
                 ))}
-                <div>
-                  <div style={{fontSize:12,color:"#666",marginBottom:4}}>Niveau</div>
-                  <select value={newOp.level} onChange={e=>setNewOp({...newOp,level:e.target.value})}
-                    style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                <div><div style={{fontSize:12,color:"#666",marginBottom:4}}>Niveau</div>
+                  <select value={newOp.level} onChange={e=>setNewOp({...newOp,level:e.target.value})} style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                     {["N1","N2","N3","N4"].map(l=><option key={l}>{l}</option>)}
-                  </select>
-                </div>
+                  </select></div>
                 <button onClick={addOperator} style={{padding:"7px 16px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>Enregistrer</button>
                 <button onClick={()=>setShowAddOp(false)} style={{padding:"7px 14px",borderRadius:7,background:"#fff",color:"#333",border:"1px solid #ccc",cursor:"pointer",fontSize:13}}>Annuler</button>
               </div>
@@ -915,12 +962,10 @@ export default function App() {
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <LevelBadge level={op.level}/>
-                    <button onClick={()=>toggleActive(op.id)}
-                      style={{padding:"4px 12px",borderRadius:6,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:12,color:op.active?"#c62828":"#2e7d32"}}>
+                    <button onClick={()=>toggleActive(op.id)} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:12,color:op.active?"#c62828":"#2e7d32"}}>
                       {op.active?"Désactiver":"Activer"}
                     </button>
-                    <button onClick={()=>deleteOp(op.id)}
-                      style={{padding:"4px 10px",borderRadius:6,border:"1px solid #f5c6c6",background:"#fff5f5",cursor:"pointer",fontSize:12,color:"#c62828"}}>🗑</button>
+                    <button onClick={()=>deleteOp(op.id)} style={{padding:"4px 10px",borderRadius:6,border:"1px solid #f5c6c6",background:"#fff5f5",cursor:"pointer",fontSize:12,color:"#c62828"}}>🗑</button>
                   </div>
                 </div>
               ))}
