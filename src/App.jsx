@@ -47,16 +47,18 @@ const SHIFT_MAX = {matin:3,am:2,nuit:3};
 const SHIFT_MIN = {matin:3,am:2,nuit:3};
 
 // ── CYCLE FIXE : Matin → Nuit → AM ──
+// N4 : Matin→Nuit→AM
 const N4_CYCLE = [
   {matin:["GIBEAUX"],  nuit:["LENDORMY"], am:["MARTIN"]  },
   {matin:["MARTIN"],   nuit:["GIBEAUX"],  am:["LENDORMY"]},
   {matin:["LENDORMY"], nuit:["MARTIN"],   am:["GIBEAUX"] },
 ];
+// Non-N4 : cycle original validé, sans nuits consécutives
 const NON_N4_CYCLE = [
   {matin:["HEBERT","VALLET"],  nuit:["BRUNY","CADINOT"],  am:["ALLAIN"]  },
-  {matin:["BRUNY","ALLAIN"],   nuit:["HEBERT","VALLET"],  am:["CADINOT"] },
+  {matin:["HEBERT","BRUNY"],   nuit:["VALLET","ALLAIN"],  am:["CADINOT"] },
+  {matin:["BRUNY","ALLAIN"],   nuit:["HEBERT","CADINOT"], am:["VALLET"]  },
   {matin:["CADINOT","ALLAIN"], nuit:["BRUNY","VALLET"],   am:["HEBERT"]  },
-  {matin:["HEBERT","BRUNY"],   nuit:["CADINOT","ALLAIN"], am:["VALLET"]  },
   {matin:["VALLET","CADINOT"], nuit:["HEBERT","ALLAIN"],  am:["BRUNY"]   },
 ];
 
