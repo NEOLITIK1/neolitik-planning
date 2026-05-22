@@ -93,11 +93,8 @@ const LEVEL_BADGE = {
   N1:{bg:"#EEEEEE",color:"#424242"},
 };
 const DAYS_FR = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
-const CYCLE_OPTIONS = [
-  {value:"matin-am-nuit",label:"Matin → AM → Nuit"},
-  {value:"nuit-matin-am",label:"Nuit → Matin → AM"},
-  {value:"am-nuit-matin",label:"AM → Nuit → Matin"},
-];
+// Cycle fixe — ne jamais modifier sans changer le code
+const CYCLE_FIXE = "matin-am-nuit";
 
 // ── UTILITAIRES DATE ──
 function getMondayOfWeek(w,year) {
@@ -264,7 +261,7 @@ export default function App(){
   const [pinnedOverrides,setPinnedOverrides]=useState({});
   const [satWeeks,setSatWeeks]=useState([]);
   const [notes,setNotes]=useState({});
-  const [cycleDir,setCycleDir]=useState("matin-am-nuit");
+  const [cycleDir] = useState(CYCLE_FIXE);
   const [year,setYear]=useState(2026);
   const [history,setHistory]=useState([]);
   const [startWeek,setStartWeek]=useState(22);
@@ -296,15 +293,15 @@ export default function App(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,sw,nt,cy,hi,yr,po]=await Promise.all([
+        const [ops,abs,lv,ov,sw,nt,hi,yr,po]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),
-          sbGet("satweeks"),sbGet("notes"),sbGet("cycle_direction"),
+          sbGet("satweeks"),sbGet("notes"),
           sbGet("history"),sbGet("year"),sbGet("pinned_overrides"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
         if(abs)setAbsences(abs);if(lv)setLeaves(lv);
         if(ov)setOverrides(ov);if(sw)setSatWeeks(sw);
-        if(nt)setNotes(nt);if(cy)setCycleDir(cy);
+        if(nt)setNotes(nt);
         if(hi)setHistory(hi);if(yr)setYear(Number(yr));
         if(po)setPinnedOverrides(po);
         setSyncMsg("Synchronisé ✓");
@@ -333,7 +330,7 @@ export default function App(){
   const savePinned   =useCallback(v=>{setPinnedOverrides(v);save("pinned_overrides",v);},[save]);
   const saveSatWeeks =useCallback(v=>{setSatWeeks(v); save("satweeks",v);          },[save]);
   const saveNotes    =useCallback(v=>{setNotes(v);    save("notes",v);             },[save]);
-  const saveCycleDir =useCallback(v=>{setCycleDir(v); save("cycle_direction",v);   },[save]);
+
   const saveYear     =useCallback(v=>{setYear(v);     save("year",String(v));       },[save]);
 
   const activeOps=operators.filter(o=>o.active);
@@ -581,12 +578,7 @@ export default function App(){
                 ))}
                 <span style={{fontSize:13,color:"#888"}}>sem.</span>
               </div>
-              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                <label style={{fontSize:13,color:"#555",fontWeight:500}}>Cycle</label>
-                <select value={cycleDir} onChange={e=>saveCycleDir(e.target.value)} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
-                  {CYCLE_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </div>
+
               <div style={{display:"flex",gap:6,marginLeft:"auto",flexWrap:"wrap"}}>
                 <button onClick={generate}
                   style={{padding:"6px 16px",borderRadius:7,background:"#c62828",color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}
