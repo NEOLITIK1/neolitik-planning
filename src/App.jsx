@@ -46,46 +46,20 @@ const BRAND = "#3a5c35";
 const SHIFT_MAX = {matin:3,am:2,nuit:3};
 const SHIFT_MIN = {matin:3,am:2,nuit:3};
 
-const N4_CYCLES = {
-  "matin-am-nuit":[
-    {matin:["GIBEAUX"], am:["MARTIN"],   nuit:["LENDORMY"]},
-    {matin:["LENDORMY"],am:["GIBEAUX"],  nuit:["MARTIN"]  },
-    {matin:["MARTIN"],  am:["LENDORMY"], nuit:["GIBEAUX"] },
-  ],
-  "nuit-matin-am":[
-    {nuit:["GIBEAUX"], matin:["MARTIN"],   am:["LENDORMY"]},
-    {nuit:["LENDORMY"],matin:["GIBEAUX"],  am:["MARTIN"]  },
-    {nuit:["MARTIN"],  matin:["LENDORMY"], am:["GIBEAUX"] },
-  ],
-  "am-nuit-matin":[
-    {am:["GIBEAUX"], nuit:["MARTIN"],   matin:["LENDORMY"]},
-    {am:["LENDORMY"],nuit:["GIBEAUX"],  matin:["MARTIN"]  },
-    {am:["MARTIN"],  nuit:["LENDORMY"], matin:["GIBEAUX"] },
-  ],
-};
-const NON_N4_CYCLES = {
-  "matin-am-nuit":[
-    {matin:["HEBERT","VALLET"], am:["ALLAIN"],  nuit:["BRUNY","CADINOT"] },
-    {matin:["HEBERT","BRUNY"],  am:["CADINOT"], nuit:["VALLET","ALLAIN"] },
-    {matin:["BRUNY","ALLAIN"],  am:["VALLET"],  nuit:["HEBERT","CADINOT"]},
-    {matin:["CADINOT","ALLAIN"],am:["HEBERT"],  nuit:["BRUNY","VALLET"]  },
-    {matin:["VALLET","CADINOT"],am:["BRUNY"],   nuit:["HEBERT","ALLAIN"] },
-  ],
-  "nuit-matin-am":[
-    {nuit:["HEBERT","VALLET"], matin:["ALLAIN"],  am:["BRUNY","CADINOT"] },
-    {nuit:["HEBERT","BRUNY"],  matin:["CADINOT"], am:["VALLET","ALLAIN"] },
-    {nuit:["BRUNY","ALLAIN"],  matin:["VALLET"],  am:["HEBERT","CADINOT"]},
-    {nuit:["CADINOT","ALLAIN"],matin:["HEBERT"],  am:["BRUNY","VALLET"]  },
-    {nuit:["VALLET","CADINOT"],matin:["BRUNY"],   am:["HEBERT","ALLAIN"] },
-  ],
-  "am-nuit-matin":[
-    {am:["HEBERT","VALLET"], nuit:["ALLAIN"],  matin:["BRUNY","CADINOT"] },
-    {am:["HEBERT","BRUNY"],  nuit:["CADINOT"], matin:["VALLET","ALLAIN"] },
-    {am:["BRUNY","ALLAIN"],  nuit:["VALLET"],  matin:["HEBERT","CADINOT"]},
-    {am:["CADINOT","ALLAIN"],nuit:["HEBERT"],  matin:["BRUNY","VALLET"]  },
-    {am:["VALLET","CADINOT"],nuit:["BRUNY"],   matin:["HEBERT","ALLAIN"] },
-  ],
-};
+// ── CYCLE FIXE : Matin → Nuit → AM ──
+const N4_CYCLE = [
+  {matin:["GIBEAUX"],  nuit:["LENDORMY"], am:["MARTIN"]  },
+  {matin:["MARTIN"],   nuit:["GIBEAUX"],  am:["LENDORMY"]},
+  {matin:["LENDORMY"], nuit:["MARTIN"],   am:["GIBEAUX"] },
+];
+const NON_N4_CYCLE = [
+  {matin:["HEBERT","VALLET"],  nuit:["BRUNY","CADINOT"],  am:["ALLAIN"]  },
+  {matin:["BRUNY","ALLAIN"],   nuit:["HEBERT","VALLET"],  am:["CADINOT"] },
+  {matin:["CADINOT","ALLAIN"], nuit:["BRUNY","VALLET"],   am:["HEBERT"]  },
+  {matin:["HEBERT","BRUNY"],   nuit:["CADINOT","ALLAIN"], am:["VALLET"]  },
+  {matin:["VALLET","CADINOT"], nuit:["HEBERT","ALLAIN"],  am:["BRUNY"]   },
+];
+
 const LEVEL_BADGE = {
   N4:{bg:"#C8E6C9",color:"#1B5E20"},
   N3:{bg:"#FFF9C4",color:"#F57F17"},
@@ -93,8 +67,6 @@ const LEVEL_BADGE = {
   N1:{bg:"#EEEEEE",color:"#424242"},
 };
 const DAYS_FR = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
-// Cycle fixe — ne jamais modifier sans changer le code
-const CYCLE_FIXE = "matin-am-nuit";
 
 // ── UTILITAIRES DATE ──
 function getMondayOfWeek(w,year) {
@@ -115,37 +87,34 @@ function getCurrentWeek(year){
 }
 
 // ── ALGORITHME ──
-function computeSchedule(weekNum,operators,absences,leaves,cycleDir,pinnedOverrides) {
+function computeSchedule(weekNum,operators,absences,leaves,pinnedOverrides) {
   const activeOps = operators.filter(o=>o.active);
   const allN4shorts = activeOps.filter(o=>o.level==="N4").map(o=>o.short);
   const n4Ph = ((weekNum-REF_WEEK)%3+3)%3;
   const nonPh = ((weekNum-REF_WEEK)%5+5)%5;
-  const n4Base = N4_CYCLES[cycleDir][n4Ph];
-  const nonBase = NON_N4_CYCLES[cycleDir][nonPh];
+  const n4Base = N4_CYCLE[n4Ph];
+  const nonBase = NON_N4_CYCLE[nonPh];
 
-  // Absences complètes (semaine entière)
   const weekAbsFull = [
     ...(absences[weekNum]||[]).filter(e=>!e.includes("|")),
     ...(leaves[weekNum]||[]).filter(e=>!e.includes(":")),
   ];
-  // Absences partielles (un jour)
   const weekAbsPartial = (absences[weekNum]||[]).filter(e=>e.includes("|"));
 
-  // Construction des slots depuis les cycles de base
   const slots = {
     matin:[...(n4Base.matin||[]),...(nonBase.matin||[])],
-    am:   [...(n4Base.am||[]),   ...(nonBase.am||[])   ],
     nuit: [...(n4Base.nuit||[]), ...(nonBase.nuit||[]) ],
+    am:   [...(n4Base.am||[]),   ...(nonBase.am||[])   ],
   };
 
-  // Retirer les opérateurs inactifs des slots
-  ["matin","am","nuit"].forEach(sh=>{
+  // Retirer les opérateurs inactifs
+  ["matin","nuit","am"].forEach(sh=>{
     slots[sh]=slots[sh].filter(s=>activeOps.some(o=>o.short===s));
   });
 
-  // Intégrer les nouveaux opérateurs non-DEFAULT et non-N4-volants
+  // Nouveaux opérateurs non-DEFAULT non-N4-volants
   const newOps = activeOps.filter(o=>
-    !DEFAULT_SHORTS.includes(o.short) && !BASE_N4.includes(o.short) && o.level!=="N4"
+    !DEFAULT_SHORTS.includes(o.short) && o.level!=="N4"
   );
   newOps.forEach(op=>{
     const pk=`${weekNum}-${op.short}`;
@@ -155,7 +124,7 @@ function computeSchedule(weekNum,operators,absences,leaves,cycleDir,pinnedOverri
         slots[sh].push(op.short); return;
       }
     }
-    const avail=["matin","am","nuit"].filter(sh=>slots[sh].length<SHIFT_MAX[sh]);
+    const avail=["matin","nuit","am"].filter(sh=>slots[sh].length<SHIFT_MAX[sh]);
     if(avail.length>0){
       avail.sort((a,b)=>slots[a].length-slots[b].length);
       const off=((weekNum-REF_WEEK)%avail.length+avail.length)%avail.length;
@@ -166,10 +135,10 @@ function computeSchedule(weekNum,operators,absences,leaves,cycleDir,pinnedOverri
   const alerts=[];
 
   // Remplacements absences complètes
-  ["matin","am","nuit"].forEach(shift=>{
+  ["matin","nuit","am"].forEach(shift=>{
     slots[shift].filter(s=>weekAbsFull.includes(s)).forEach(absent=>{
       const isN4=allN4shorts.includes(absent);
-      const allAssigned=new Set([...slots.matin,...slots.am,...slots.nuit]);
+      const allAssigned=new Set([...slots.matin,...slots.nuit,...slots.am]);
       const avail=activeOps.map(o=>o.short).filter(s=>
         !allAssigned.has(s)&&!weekAbsFull.includes(s)
       );
@@ -186,16 +155,13 @@ function computeSchedule(weekNum,operators,absences,leaves,cycleDir,pinnedOverri
     });
   });
 
-  // ── VÉRIFICATIONS CONTRAINTES ── (toujours calculées sur les slots finaux)
-  ["matin","am","nuit"].forEach(shift=>{
+  // Vérifications contraintes
+  ["matin","nuit","am"].forEach(shift=>{
     const clean=slots[shift].map(s=>s.replace(/^[↺⚠]/,""));
-    // N4 obligatoire
     if(!clean.some(s=>allN4shorts.includes(s)))
       alerts.push(`⚠ S${weekNum}: aucun N4 en ${shift}`);
-    // Effectif minimum
     if(clean.length<SHIFT_MIN[shift])
       alerts.push(`⚠ S${weekNum}: effectif insuffisant en ${shift} (${clean.length}/${SHIFT_MIN[shift]})`);
-    // Sureffectif
     if(clean.length>SHIFT_MAX[shift])
       alerts.push(`⚠ S${weekNum}: sureffectif en ${shift} (${clean.length}/${SHIFT_MAX[shift]})`);
   });
@@ -209,13 +175,12 @@ function computeSchedule(weekNum,operators,absences,leaves,cycleDir,pinnedOverri
   return {week:weekNum,slots,alerts};
 }
 
-// Détection nuits consécutives
 function detectConsecutiveNights(schedules){
   const byOp={};
   schedules.forEach(s=>{
     s.slots.nuit.forEach(n=>{
       const clean=n.replace(/^[↺⚠]/,"");
-      if(!byOp[clean]) byOp[clean]=[];
+      if(!byOp[clean])byOp[clean]=[];
       byOp[clean].push(s.week);
     });
   });
@@ -230,7 +195,6 @@ function detectConsecutiveNights(schedules){
   return alerts;
 }
 
-// ── COMPOSANTS ──
 function LevelBadge({level}){
   const s=LEVEL_BADGE[level]||LEVEL_BADGE.N1;
   return <span style={{background:s.bg,color:s.color,borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:500}}>{level}</span>;
@@ -251,7 +215,6 @@ function OpChip({name,operators,draggable,onDragStart,highlight}){
   );
 }
 
-// ── APP PRINCIPALE ──
 export default function App(){
   const [tab,setTab]=useState("planning");
   const [operators,setOperators]=useState(DEFAULT_OPERATORS);
@@ -261,7 +224,6 @@ export default function App(){
   const [pinnedOverrides,setPinnedOverrides]=useState({});
   const [satWeeks,setSatWeeks]=useState([]);
   const [notes,setNotes]=useState({});
-  const [cycleDir] = useState(CYCLE_FIXE);
   const [year,setYear]=useState(2026);
   const [history,setHistory]=useState([]);
   const [startWeek,setStartWeek]=useState(22);
@@ -282,28 +244,22 @@ export default function App(){
 
   const weeks=Array.from({length:numWeeks},(_,i)=>startWeek+i);
   const currentWeek=getCurrentWeek(year);
-
   const flash=(msg,color="#2e7d32")=>{setFlashMsg({msg,color});setTimeout(()=>setFlashMsg(null),2500);};
+  const volants=operators.filter(o=>o.active&&o.level==="N4"&&!DEFAULT_SHORTS.includes(o.short));
 
-  // Opérateurs volants : N4 hors DEFAULT_SHORTS, actifs
-  const volants = operators.filter(o=>o.active && o.level==="N4" && !DEFAULT_SHORTS.includes(o.short));
-
-  // ── CHARGEMENT SUPABASE ──
   useEffect(()=>{
     (async()=>{
       try{
         setSyncMsg("Connexion...");
         const [ops,abs,lv,ov,sw,nt,hi,yr,po]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),
-          sbGet("satweeks"),sbGet("notes"),
-          sbGet("history"),sbGet("year"),sbGet("pinned_overrides"),
+          sbGet("satweeks"),sbGet("notes"),sbGet("history"),sbGet("year"),sbGet("pinned_overrides"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
         if(abs)setAbsences(abs);if(lv)setLeaves(lv);
         if(ov)setOverrides(ov);if(sw)setSatWeeks(sw);
-        if(nt)setNotes(nt);
-        if(hi)setHistory(hi);if(yr)setYear(Number(yr));
-        if(po)setPinnedOverrides(po);
+        if(nt)setNotes(nt);if(hi)setHistory(hi);
+        if(yr)setYear(Number(yr));if(po)setPinnedOverrides(po);
         setSyncMsg("Synchronisé ✓");
       }catch(e){setSyncMsg(`Erreur: ${e.message}`);}
       finally{setLoaded(true);}
@@ -324,62 +280,49 @@ export default function App(){
   },[]);
 
   const saveOperators=useCallback(v=>{setOperators(v);sbSetOps(v).then(()=>setSyncMsg("Synchronisé ✓")).catch(()=>setSyncMsg("Erreur sync"));},[]);
-  const saveAbsences =useCallback(v=>{setAbsences(v); save("absences",v);         },[save]);
-  const saveLeaves   =useCallback(v=>{setLeaves(v);   save("leaves",v);            },[save]);
-  const saveOverrides=useCallback(v=>{setOverrides(v);save("overrides",v);         },[save]);
+  const saveAbsences =useCallback(v=>{setAbsences(v); save("absences",v); },[save]);
+  const saveLeaves   =useCallback(v=>{setLeaves(v);   save("leaves",v);   },[save]);
+  const saveOverrides=useCallback(v=>{setOverrides(v);save("overrides",v);},[save]);
   const savePinned   =useCallback(v=>{setPinnedOverrides(v);save("pinned_overrides",v);},[save]);
-  const saveSatWeeks =useCallback(v=>{setSatWeeks(v); save("satweeks",v);          },[save]);
-  const saveNotes    =useCallback(v=>{setNotes(v);    save("notes",v);             },[save]);
-
-  const saveYear     =useCallback(v=>{setYear(v);     save("year",String(v));       },[save]);
+  const saveSatWeeks =useCallback(v=>{setSatWeeks(v); save("satweeks",v); },[save]);
+  const saveNotes    =useCallback(v=>{setNotes(v);    save("notes",v);    },[save]);
+  const saveYear     =useCallback(v=>{setYear(v);     save("year",String(v));},[save]);
 
   const activeOps=operators.filter(o=>o.active);
 
-  // Construit les schedules depuis l'algo pur + pinnedOverrides
-  const buildFromAlgo=useCallback((ops,abs,lv,cy,po,wks)=>{
-    return wks.map(w=>computeSchedule(w,ops,abs,lv,cy,po));
+  const buildFromAlgo=useCallback((ops,abs,lv,po,wks)=>{
+    return wks.map(w=>computeSchedule(w,ops,abs,lv,po));
   },[]);
 
-  // Applique les overrides ponctuels par-dessus l'algo
-  // IMPORTANT : les overrides impliquant des volants sont CONSERVÉS même après Recalculer
-  const buildWithOverrides=useCallback((ops,abs,lv,cy,po,ov,wks)=>{
-    const base=buildFromAlgo(ops,abs,lv,cy,po,wks);
+  const buildWithOverrides=useCallback((ops,abs,lv,po,ov,wks)=>{
+    const base=buildFromAlgo(ops,abs,lv,po,wks);
     return base.map(s=>{
       const mk=sh=>ov[`${s.week}-${sh}`]||s.slots[sh];
-      return {...s,slots:{matin:mk("matin"),am:mk("am"),nuit:mk("nuit")}};
+      return {...s,slots:{matin:mk("matin"),nuit:mk("nuit"),am:mk("am")}};
     });
   },[buildFromAlgo]);
 
-  // Recalculer : efface les overrides NON-volants, conserve ceux des volants
   const generate=useCallback(()=>{
     pushHistory("Recalcul planning",{overrides,pinnedOverrides});
-    // Identifier les overrides impliquant des volants (à conserver)
     const volantShorts=operators.filter(o=>o.level==="N4"&&!DEFAULT_SHORTS.includes(o.short)).map(o=>o.short);
-    const keptOverrides={};
+    const keptOv={};
     Object.entries(overrides).forEach(([k,v])=>{
-      // Conserver si le slot contient un volant
-      const hasVolant=v.some(n=>volantShorts.includes(n.replace(/^[↺⚠]/,"")));
-      if(hasVolant) keptOverrides[k]=v;
+      if(v.some(n=>volantShorts.includes(n.replace(/^[↺⚠]/,"")))) keptOv[k]=v;
     });
-    saveOverrides(keptOverrides);
-    const s=buildWithOverrides(operators,absences,leaves,cycleDir,pinnedOverrides,keptOverrides,weeks);
+    saveOverrides(keptOv);
+    const s=buildWithOverrides(operators,absences,leaves,pinnedOverrides,keptOv,weeks);
     setSchedules(s);
     flash("Planning recalculé ✓");
-  },[operators,absences,leaves,cycleDir,pinnedOverrides,overrides,weeks,buildFromAlgo,buildWithOverrides,pushHistory,saveOverrides]);
+  },[operators,absences,leaves,pinnedOverrides,overrides,weeks,buildFromAlgo,buildWithOverrides,pushHistory,saveOverrides]);
 
-  // Recalcul automatique à chaque changement de paramètre
   useEffect(()=>{
     if(!loaded)return;
-    const s=buildWithOverrides(operators,absences,leaves,cycleDir,pinnedOverrides,overrides,weeks);
+    const s=buildWithOverrides(operators,absences,leaves,pinnedOverrides,overrides,weeks);
     setSchedules(s);
-  },[loaded,startWeek,numWeeks,operators,absences,leaves,cycleDir,pinnedOverrides,overrides,year]);
+  },[loaded,startWeek,numWeeks,operators,absences,leaves,pinnedOverrides,overrides,year]);
 
-  // Alertes : depuis schedules + nuits consécutives
-  const scheduleAlerts=schedules.flatMap(s=>s.alerts);
-  const consecutiveAlerts=detectConsecutiveNights(schedules);
-  const allAlerts=[...scheduleAlerts,...consecutiveAlerts];
+  const allAlerts=[...schedules.flatMap(s=>s.alerts),...detectConsecutiveNights(schedules)];
 
-  // ── ABSENCES ──
   const addAbsence=()=>{
     if(!absOp)return;
     pushHistory(`Absence: ${absOp} S${absWeek}`,{absences});
@@ -397,7 +340,6 @@ export default function App(){
     saveAbsences(next);
   };
 
-  // ── CONGÉS ──
   const leaveShort=e=>e.includes(":")?e.split(":")[0]:e;
   const leaveLabel=e=>{
     if(!e.includes(":"))return "Semaine complète";
@@ -421,37 +363,31 @@ export default function App(){
     saveLeaves(next);
   };
 
-  // ── DRAG & DROP ──
-  // Source : soit une case du planning, soit la réserve (shift="reserve")
   const onDragStart=(weekNum,shift,name)=>{dragRef.current={weekNum,shift,name};};
-
   const onDrop=(weekNum,targetShift)=>{
     const src=dragRef.current;
     if(!src){return;}
-    // Drop depuis la réserve vers un poste
     if(src.shift==="reserve"){
-      const cleanName=src.name.replace(/^[↺⚠]/,"");
+      const cleanName=src.name;
       const tgtSlot=schedules.find(s=>s.week===weekNum)?.slots[targetShift]||[];
-      // Vérifier que le volant n'est pas déjà dans ce poste cette semaine
       if(tgtSlot.some(n=>n.replace(/^[↺⚠]/,"")=== cleanName)){
-        flash(`${cleanName} est déjà en ${targetShift} S${weekNum}`,"#c62828");
+        flash(`${cleanName} déjà en ${targetShift} S${weekNum}`,"#c62828");
         dragRef.current=null;return;
       }
       const nTgt=[...tgtSlot,cleanName];
       pushHistory(`${cleanName} (volant) → ${targetShift} S${weekNum}`,{overrides,pinnedOverrides});
       const newOv={...overrides,[`${weekNum}-${targetShift}`]:nTgt};
       saveOverrides(newOv);
-      // Pinned : mémoriser pour ce volant sur cette semaine spécifique uniquement
       const newPinned={...pinnedOverrides,[`${weekNum}-${cleanName}`]:targetShift};
       savePinned(newPinned);
       setSchedules(prev=>prev.map(s=>s.week!==weekNum?s:{...s,slots:{...s.slots,[targetShift]:nTgt}}));
       flash(`${cleanName} → ${targetShift} S${weekNum}`);
       dragRef.current=null;return;
     }
-    // Drop depuis un poste vers un autre poste
     if(src.shift===targetShift){dragRef.current=null;return;}
-    const srcSlot=schedules.find(s=>s.week===weekNum)?.slots[src.shift]||[];
+    const srcSlot=schedules.find(s=>s.week===src.weekNum)?.slots[src.shift]||[];
     const tgtSlot=schedules.find(s=>s.week===weekNum)?.slots[targetShift]||[];
+    if(src.weekNum!==weekNum){dragRef.current=null;return;}
     const cleanName=src.name.replace(/^[↺⚠]/,"");
     const nSrc=srcSlot.filter(n=>n!==src.name),nTgt=[...tgtSlot,cleanName];
     pushHistory(`Glissement: ${cleanName} S${weekNum} ${src.shift}→${targetShift}`,{overrides,pinnedOverrides});
@@ -464,7 +400,6 @@ export default function App(){
     dragRef.current=null;
   };
 
-  // ── RETOUR ARRIÈRE ──
   const undoLast=()=>{
     if(!history.length)return;
     const last=history[0],st=last.state;
@@ -479,7 +414,6 @@ export default function App(){
 
   const toggleSat=w=>saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
 
-  // ── ÉQUITÉ ──
   const equity=activeOps.map(op=>{
     let matin=0,am=0,nuit=0;
     schedules.forEach(s=>{
@@ -503,11 +437,13 @@ export default function App(){
   const toggleActive=id=>saveOperators(operators.map(o=>o.id===id?{...o,active:!o.active}:o));
   const deleteOp=id=>{if(window.confirm("Supprimer ?"))saveOperators(operators.filter(o=>o.id!==id));};
 
+  // Matin en premier, puis Nuit, puis AM — reflète le cycle Matin→Nuit→AM
   const shiftMeta=[
-    {key:"matin",label:"Matin 5h50–14h",bg:"#f0faf1",hbg:"#D6EFD8",tc:"#1B5E20"},
-    {key:"am",   label:"AM 13h50–22h",  bg:"#fffde7",hbg:"#FFF9C4",tc:"#F57F17"},
-    {key:"nuit", label:"Nuit 21h50–6h", bg:"#e3f2fd",hbg:"#BBDEFB",tc:"#0D47A1"},
+    {key:"matin",label:"Matin 5h50–14h", bg:"#f0faf1",hbg:"#D6EFD8",tc:"#1B5E20"},
+    {key:"nuit", label:"Nuit 21h50–6h",  bg:"#e3f2fd",hbg:"#BBDEFB",tc:"#0D47A1"},
+    {key:"am",   label:"AM 13h50–22h",   bg:"#fffde7",hbg:"#FFF9C4",tc:"#F57F17"},
   ];
+
   const TABS=[
     {id:"planning",label:"Planning",  icon:"📅"},
     {id:"conges",  label:"Congés",    icon:"🏖"},
@@ -515,6 +451,7 @@ export default function App(){
     {id:"equite",  label:"Équité",    icon:"📊"},
     {id:"equipe",  label:"Équipe",    icon:"👥"},
   ];
+
   const chipLabel=n=>{
     if(!showFullNames)return n;
     const clean=n.replace(/^[↺⚠]/,""),marker=n!==clean?n[0]:"";
@@ -522,7 +459,6 @@ export default function App(){
     return marker+(op?.full||clean);
   };
 
-  // ── RENDU ──
   return (
     <div style={{fontFamily:"'DM Sans','Outfit',sans-serif",background:"#f7f8fa",minHeight:"100vh"}}>
       {flashMsg&&(
@@ -531,7 +467,6 @@ export default function App(){
         </div>
       )}
 
-      {/* HEADER */}
       <div style={{background:BRAND,color:"#fff",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:52,position:"sticky",top:0,zIndex:100}}>
         <span style={{fontWeight:700,fontSize:18,letterSpacing:1.5}}>NEOLITIK</span>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
@@ -545,7 +480,6 @@ export default function App(){
         </div>
       </div>
 
-      {/* TABS */}
       <div style={{display:"flex",borderBottom:"1px solid #e0e0e0",background:"#fff",paddingLeft:16,overflowX:"auto",position:"sticky",top:52,zIndex:99}}>
         {TABS.map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
@@ -557,7 +491,6 @@ export default function App(){
 
       <div style={{padding:"20px 20px 60px",maxWidth:1200,margin:"0 auto"}}>
 
-        {/* ══════════════ PLANNING ══════════════ */}
         {tab==="planning"&&(
           <div>
             {/* Barre de contrôle */}
@@ -578,11 +511,10 @@ export default function App(){
                 ))}
                 <span style={{fontSize:13,color:"#888"}}>sem.</span>
               </div>
-
               <div style={{display:"flex",gap:6,marginLeft:"auto",flexWrap:"wrap"}}>
                 <button onClick={generate}
                   style={{padding:"6px 16px",borderRadius:7,background:"#c62828",color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}
-                  title="Recalcule l'algorithme. Conserve les volants placés manuellement. Efface les autres glissements ponctuels.">
+                  title="Recalcule depuis zéro. Conserve les volants et contraintes mémorisées.">
                   🔄 Recalculer
                 </button>
                 {[{k:"liste",l:"📋 Liste"},{k:"colonnes",l:"🗂 Colonnes"}].map(v=>(
@@ -594,26 +526,21 @@ export default function App(){
               </div>
             </div>
 
-            {/* Réserve des volants */}
+            {/* Réserve volants */}
             {volants.length>0&&(
               <div style={{background:"#fff",borderRadius:10,border:"2px dashed #a5d6a7",padding:"10px 16px",marginBottom:12}}>
-                <div style={{fontSize:12,fontWeight:600,color:BRAND,marginBottom:6}}>
-                  🔄 Réserve — Glissez un volant vers un poste du planning
-                </div>
+                <div style={{fontSize:12,fontWeight:600,color:BRAND,marginBottom:6}}>🔄 Réserve — Glissez un volant vers un poste</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                   {volants.map(op=>(
                     <span key={op.id} draggable
                       onDragStart={()=>dragRef.current={weekNum:null,shift:"reserve",name:op.short}}
-                      title={`${op.full} — glissez vers un poste`}
+                      title={op.full}
                       style={{display:"inline-flex",alignItems:"center",gap:4,background:"#C8E6C9",color:"#1B5E20",borderRadius:6,padding:"4px 12px",fontSize:13,fontWeight:600,cursor:"grab",border:"1px solid #a5d6a7"}}>
-                      ✋ {op.short}
-                      <span style={{fontSize:10,opacity:.7}}>volant</span>
+                      ✋ {op.short} <span style={{fontSize:10,opacity:.7}}>volant</span>
                     </span>
                   ))}
                 </div>
-                <div style={{fontSize:11,color:"#888",marginTop:6}}>
-                  Pour retirer un volant du planning : utilisez ↩ Annuler ou Recalculer.
-                </div>
+                <div style={{fontSize:11,color:"#888",marginTop:6}}>Pour retirer : utilisez ↩ Annuler ou 🔄 Recalculer.</div>
               </div>
             )}
 
@@ -648,11 +575,11 @@ export default function App(){
               <div style={{marginTop:8,display:"flex",flexWrap:"wrap",gap:5}}>
                 {Object.entries(absences).sort((a,b)=>Number(a[0])-Number(b[0])).flatMap(([week,arr])=>
                   arr.map(entry=>{
-                    const isPartial=entry.includes("|");
-                    const[short,,dayLbl]=isPartial?entry.split("|"):[entry,null,null];
+                    const isP=entry.includes("|");
+                    const[short,,dayLbl]=isP?entry.split("|"):[entry,null,null];
                     return(
-                      <span key={`${week}-${entry}`} style={{background:isPartial?"#fff8e1":"#fdecea",color:isPartial?"#f57f17":"#b71c1c",borderRadius:20,padding:"3px 10px",fontSize:12,display:"flex",alignItems:"center",gap:5}}>
-                        S{week} – {short}{isPartial?` (${dayLbl})`:""}
+                      <span key={`${week}-${entry}`} style={{background:isP?"#fff8e1":"#fdecea",color:isP?"#f57f17":"#b71c1c",borderRadius:20,padding:"3px 10px",fontSize:12,display:"flex",alignItems:"center",gap:5}}>
+                        S{week} – {short}{isP?` (${dayLbl})`:""}
                         <button onClick={()=>removeAbsence(Number(week),entry)} style={{background:"none",border:"none",cursor:"pointer",color:"inherit",padding:0,fontSize:14}}>×</button>
                       </span>
                     );
@@ -685,9 +612,9 @@ export default function App(){
                       <th style={{padding:"10px 12px",textAlign:"left",minWidth:80}}>Semaine</th>
                       <th style={{padding:"10px 12px",textAlign:"left",minWidth:110}}>Dates</th>
                       <th style={{padding:"10px 12px",background:"#D6EFD8",color:"#1B5E20",minWidth:150}}>Matin 5h50–14h</th>
-                      <th style={{padding:"10px 12px",background:"#FFF9C4",color:"#F57F17",minWidth:130}}>AM 13h50–22h</th>
                       <th style={{padding:"10px 12px",background:"#BBDEFB",color:"#0D47A1",minWidth:150}}>Nuit 21h50–6h</th>
-                      <th style={{padding:"10px 12px",textAlign:"center",width:70,fontSize:11}}>Sam.</th>
+                      <th style={{padding:"10px 12px",background:"#FFF9C4",color:"#F57F17",minWidth:130}}>AM 13h50–22h</th>
+                      <th style={{padding:"10px 12px",textAlign:"center",width:80,fontSize:11}}>Sam.</th>
                       <th style={{padding:"10px 12px",minWidth:120,fontSize:11}}>Note</th>
                     </tr>
                   </thead>
@@ -695,7 +622,8 @@ export default function App(){
                     {schedules.map((s,i)=>{
                       const hasSat=satWeeks.includes(s.week);
                       const isCurrent=s.week===currentWeek;
-                      const m=getMondayOfWeek(s.week,year),end=new Date(m);end.setDate(m.getDate()+(hasSat?5:4));
+                      const m=getMondayOfWeek(s.week,year),end=new Date(m);
+                      end.setDate(m.getDate()+(hasSat?5:4));
                       return(
                         <tr key={s.week} style={{borderBottom:"1px solid #f0f0f0",background:isCurrent?"#f1f8e9":i%2===0?"#fff":"#fafafa",outline:isCurrent?`2px solid ${BRAND}`:"none"}}>
                           <td style={{padding:"10px 12px",fontWeight:700,color:isCurrent?BRAND:"inherit"}}>
@@ -718,6 +646,7 @@ export default function App(){
                               </div>
                             </td>
                           ))}
+                          {/* Bouton Sam uniquement en vue liste */}
                           <td style={{padding:"8px",textAlign:"center"}}>
                             <button onClick={()=>toggleSat(s.week)}
                               style={{background:hasSat?"#fdecea":"#f5f5f5",border:`1px solid ${hasSat?"#ef9a9a":"#ccc"}`,borderRadius:6,cursor:"pointer",padding:"4px 8px",fontSize:12,color:hasSat?"#b71c1c":"#555"}}>
@@ -736,25 +665,23 @@ export default function App(){
               </div>
             )}
 
-            {/* VUE COLONNES */}
+            {/* VUE COLONNES — pas de bouton Sam, juste le picto si actif */}
             {view==="colonnes"&&(
               <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8}}>
                 {schedules.map(s=>{
                   const hasSat=satWeeks.includes(s.week);
                   const isCurrent=s.week===currentWeek;
-                  const m=getMondayOfWeek(s.week,year),end=new Date(m);end.setDate(m.getDate()+(hasSat?5:4));
+                  const m=getMondayOfWeek(s.week,year),end=new Date(m);
+                  end.setDate(m.getDate()+(hasSat?5:4));
                   return(
                     <div key={s.week} style={{minWidth:210,background:"#fff",border:`2px solid ${isCurrent?BRAND:"#e0e0e0"}`,borderRadius:10,overflow:"hidden",flexShrink:0}}>
                       <div style={{background:isCurrent?"#2d4828":BRAND,color:"#fff",padding:"10px 14px"}}>
                         <div style={{fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:6}}>
                           S{s.week}{isCurrent&&<span style={{fontSize:10,background:"rgba(255,255,255,0.25)",borderRadius:3,padding:"1px 4px"}}>● Now</span>}
                         </div>
-                        <div style={{fontSize:11,opacity:.75}}>
+                        <div style={{fontSize:11,opacity:.75,display:"flex",alignItems:"center",gap:6}}>
                           {fmtDate(m)} – {fmtDate(end)}
-                          {hasSat&&<span style={{marginLeft:6,background:"#c62828",borderRadius:3,padding:"1px 5px",fontSize:10}}>⚠ Sam.</span>}
-                        </div>
-                        <div style={{marginTop:4,fontSize:11,opacity:.6,cursor:"pointer",textDecoration:"underline"}} onClick={()=>toggleSat(s.week)}>
-                          {hasSat?"Retirer samedi":"+ Samedi travaillé"}
+                          {hasSat&&<span style={{background:"#c62828",borderRadius:3,padding:"1px 5px",fontSize:10,opacity:1}}>⚠ Sam.</span>}
                         </div>
                         <input value={notes[s.week]||""} onChange={e=>saveNotes({...notes,[s.week]:e.target.value})}
                           placeholder="Note…" style={{marginTop:5,width:"100%",padding:"3px 6px",borderRadius:4,border:"1px solid rgba(255,255,255,0.3)",fontSize:11,background:"rgba(255,255,255,0.1)",color:"#fff"}}/>
@@ -781,7 +708,6 @@ export default function App(){
           </div>
         )}
 
-        {/* ══════════════ CONGÉS ══════════════ */}
         {tab==="conges"&&(
           <div>
             <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Gestion des congés</div>
@@ -845,7 +771,6 @@ export default function App(){
           </div>
         )}
 
-        {/* ══════════════ HISTORIQUE ══════════════ */}
         {tab==="absences"&&(
           <div>
             <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Historique absences ponctuelles</div>
@@ -867,14 +792,14 @@ export default function App(){
                         <td style={{padding:"10px 14px"}}>
                           <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
                             {arr.map(entry=>{
-                              const isPartial=entry.includes("|");
-                              const[short,,dayLbl]=isPartial?entry.split("|"):[entry,null,null];
+                              const isP=entry.includes("|");
+                              const[short,,dayLbl]=isP?entry.split("|"):[entry,null,null];
                               const lv=operators.find(o=>o.short===short)?.level||"N1";
                               const s=LEVEL_BADGE[lv];
                               return(
-                                <span key={entry} style={{display:"inline-flex",alignItems:"center",gap:5,background:isPartial?"#fff8e1":"#fdecea",color:isPartial?"#f57f17":"#b71c1c",borderRadius:20,padding:"3px 10px",fontSize:12}}>
+                                <span key={entry} style={{display:"inline-flex",alignItems:"center",gap:5,background:isP?"#fff8e1":"#fdecea",color:isP?"#f57f17":"#b71c1c",borderRadius:20,padding:"3px 10px",fontSize:12}}>
                                   <span style={{background:s.bg,color:s.color,borderRadius:3,padding:"0 4px",fontSize:10,fontWeight:600}}>{lv}</span>
-                                  {short}{isPartial?` — ${dayLbl}`:" (sem.)"}
+                                  {short}{isP?` — ${dayLbl}`:" (sem.)"}
                                   <button onClick={()=>removeAbsence(Number(week),entry)} style={{background:"none",border:"none",cursor:"pointer",color:"inherit",padding:0,fontSize:14}}>×</button>
                                 </span>
                               );
@@ -908,7 +833,6 @@ export default function App(){
           </div>
         )}
 
-        {/* ══════════════ ÉQUITÉ ══════════════ */}
         {tab==="equite"&&(
           <div>
             <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Équité — S{startWeek} à S{startWeek+numWeeks-1} ({year})</div>
@@ -918,8 +842,8 @@ export default function App(){
                   <th style={{padding:"10px 14px",textAlign:"left"}}>Opérateur</th>
                   <th style={{padding:"10px 14px",textAlign:"left"}}>Niveau</th>
                   <th style={{padding:"10px 14px",textAlign:"center",color:"#1B5E20"}}>Matin</th>
-                  <th style={{padding:"10px 14px",textAlign:"center",color:"#F57F17"}}>AM</th>
                   <th style={{padding:"10px 14px",textAlign:"center",color:"#0D47A1"}}>Nuit</th>
+                  <th style={{padding:"10px 14px",textAlign:"center",color:"#F57F17"}}>AM</th>
                   <th style={{padding:"10px 14px",textAlign:"center"}}>Total</th>
                   <th style={{padding:"10px 14px",textAlign:"center"}}>Équilibre</th>
                 </tr></thead>
@@ -928,7 +852,7 @@ export default function App(){
                     <tr key={op.id} style={{borderBottom:"1px solid #f0f0f0",background:op.imbalance?"#fff8e1":i%2===0?"#fff":"#fafafa"}}>
                       <td style={{padding:"10px 14px",fontWeight:500}}>{op.full}</td>
                       <td style={{padding:"10px 14px"}}><LevelBadge level={op.level}/></td>
-                      {[{k:"matin",bg:"#D6EFD8",tc:"#1B5E20"},{k:"am",bg:"#FFF9C4",tc:"#F57F17"},{k:"nuit",bg:"#BBDEFB",tc:"#0D47A1"}].map(sh=>(
+                      {[{k:"matin",bg:"#D6EFD8",tc:"#1B5E20"},{k:"nuit",bg:"#BBDEFB",tc:"#0D47A1"},{k:"am",bg:"#FFF9C4",tc:"#F57F17"}].map(sh=>(
                         <td key={sh.k} style={{padding:"8px 14px",textAlign:"center"}}>
                           <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
                             <div style={{width:Math.round((op[sh.k]/Math.max(numWeeks,1))*60),height:8,background:sh.bg,borderRadius:4,minWidth:2}}/>
@@ -955,7 +879,6 @@ export default function App(){
           </div>
         )}
 
-        {/* ══════════════ ÉQUIPE ══════════════ */}
         {tab==="equipe"&&(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
