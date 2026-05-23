@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
+// Détection mode lecture seule (lien WhatsApp : ?view=planning)
+const IS_PUBLIC = new URLSearchParams(window.location.search).get("view") === "planning";
+
 // ── SUPABASE ──────────────────────────────────────────────────────────────────
 const SB_URL = "https://kgnpfwfuqwltxyrqfejk.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtnbnBmd2Z1cXdsdHh5cnFmZWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyODExODMsImV4cCI6MjA5NDg1NzE4M30.1-y6H9mB65WdJPSGrn70m0Z4kgzDDdt2hnwD04QRqio";
@@ -212,8 +215,126 @@ function OpChip({name,operators,draggable,onDragStart,highlight}){
   );
 }
 
-// ── APP ───────────────────────────────────────────────────────────────────────
+// ── VUE PUBLIQUE (lecture seule) ─────────────────────────────────────────────
+function PublicView() {
+  const [data, setData]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+
+  useEffect(()=>{
+    (async()=>{
+      try {
+        const snapshot = await sbGet("published_planning");
+        if(!snapshot) { setError("Aucun planning publié pour le moment."); return; }
+        setData(snapshot);
+      } catch(e) {
+        setError("Erreur de chargement.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  },[]);
+
+  if(loading) return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",fontFamily:"'DM Sans',sans-serif",color:"#666"}}>
+      Chargement du planning…
+    </div>
+  );
+  if(error) return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",fontFamily:"'DM Sans',sans-serif",color:"#c62828"}}>
+      {error}
+    </div>
+  );
+
+  const {schedules, operators, satWeeks, notes, publishedAt, year} = data;
+  const SMETA = [
+    {key:"matin",label:"🌅 Matin 5h50–14h", hbg:"#D6EFD8",tc:"#1B5E20"},
+    {key:"am",   label:"🌆 AM 13h50–22h",   hbg:"#FFF9C4",tc:"#F57F17"},
+    {key:"nuit", label:"🌙 Nuit 21h50–6h",  hbg:"#BBDEFB",tc:"#0D47A1"},
+  ];
+
+  return(
+    <div style={{fontFamily:"'DM Sans','Outfit',sans-serif",background:"#f7f8fa",minHeight:"100vh"}}>
+      {/* Header */}
+      <div style={{background:BRAND,color:"#fff",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:52}}>
+        <span style={{fontWeight:700,fontSize:18,letterSpacing:1.5}}>NEOLITIK</span>
+        <span style={{fontSize:12,opacity:.7}}>Planning 3×8 — lecture seule</span>
+      </div>
+
+      <div style={{padding:"20px 16px 60px",maxWidth:1100,margin:"0 auto"}}>
+        {/* Info publication */}
+        {publishedAt&&(
+          <div style={{fontSize:12,color:"#888",marginBottom:16,textAlign:"right"}}>
+            Publié le {new Date(publishedAt).toLocaleString("fr-FR")}
+          </div>
+        )}
+
+        {/* Vue colonnes */}
+        <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8}}>
+          {schedules.map(sc=>{
+            const hasSat = (satWeeks||[]).includes(sc.s);
+            const note   = (notes||{})[sc.s];
+            const m = getMondayOfWeek(sc.s, year||2026);
+            const end = new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
+
+            return(
+              <div key={sc.s} style={{minWidth:200,flex:"0 0 200px",background:"#fff",border:"1px solid #e0e0e0",borderRadius:10,overflow:"hidden"}}>
+                {/* Header semaine */}
+                <div style={{background:BRAND,color:"#fff",padding:"10px 14px"}}>
+                  <div style={{fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:6}}>
+                    S{sc.s}
+                    {hasSat&&<span style={{background:"#c62828",borderRadius:3,padding:"1px 6px",fontSize:10}}>🔴 Sam.</span>}
+                  </div>
+                  <div style={{fontSize:11,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}</div>
+                  {note&&<div style={{marginTop:4,fontSize:11,background:"rgba(255,255,255,.15)",borderRadius:4,padding:"2px 6px"}}>{note}</div>}
+                </div>
+
+                {/* Postes */}
+                {SMETA.map(sh=>{
+                  const ops_in = sc[sh.key]||[];
+                  return(
+                    <div key={sh.key} style={{background:sh.hbg,padding:"8px 10px",borderBottom:"1px solid rgba(0,0,0,.06)"}}>
+                      <div style={{fontSize:10,fontWeight:600,color:sh.tc,marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>{sh.label}</div>
+                      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                        {ops_in.map(short=>{
+                          const op = (operators||[]).find(o=>o.short===short);
+                          const lv = op?.level||"N1";
+                          const s  = LEVEL_BADGE[lv];
+                          return(
+                            <span key={short} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,fontWeight:500}}>
+                              <span style={{background:s.bg,color:s.color,borderRadius:3,padding:"1px 5px",fontSize:10}}>{lv}</span>
+                              {op?.full||short}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Légende */}
+        <div style={{display:"flex",gap:12,marginTop:20,fontSize:11,color:"#888",flexWrap:"wrap"}}>
+          <span style={{background:"#D6EFD8",padding:"2px 8px",borderRadius:3}}>Matin</span>
+          <span style={{background:"#FFF9C4",padding:"2px 8px",borderRadius:3}}>AM</span>
+          <span style={{background:"#BBDEFB",padding:"2px 8px",borderRadius:3}}>Nuit</span>
+          {Object.values(LEVEL_BADGE).map((s,i)=>(
+            <span key={i} style={{background:s.bg,color:s.color,padding:"2px 8px",borderRadius:3}}>{"N"+(i+1)}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── APP PRINCIPALE ────────────────────────────────────────────────────────────
 export default function App(){
+  // Mode lecture seule : afficher directement la vue publique
+  if(IS_PUBLIC) return <PublicView/>;
+
   const [tab,setTab]             = useState("planning");
   const [operators,setOperators] = useState(DEFAULT_OPERATORS);
   const [absences,setAbsences]   = useState({});
@@ -239,7 +360,8 @@ export default function App(){
   const [schedules,setSchedules] = useState([]);
   const [equity,setEquity]       = useState([]);
   const [loaded,setLoaded]       = useState(false);
-  const [exportModal,setExportModal] = useState(false);
+  const [publishModal,setPublishModal] = useState(false);
+  const [publishNbWeeks,setPublishNbWeeks] = useState(3);
   const dragRef = useRef(null);
 
   const weeks = Array.from({length:numWeeks},(_,i)=>startWeek+i);
@@ -452,12 +574,27 @@ export default function App(){
   const toggleSat = w=>saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
 
   // ── EXPORT
-  const exportText = ()=>{
-    let txt="NEOLITIK – Planning 3×8\nSemaine\tMatin\tAM\tNuit\n";
-    schedules.forEach(({s,matin,am,nuit})=>{
-      txt+=`S${s}\t${matin.join(", ")}\t${am.join(", ")}\t${nuit.join(", ")}\n`;
-    });
-    return txt;
+  const publish = async()=>{
+    // Prendre les N premières semaines du planning courant
+    const toPublish = schedules.slice(0, publishNbWeeks);
+    const snapshot = {
+      schedules: toPublish,
+      operators: operators.filter(o=>o.active),
+      satWeeks,
+      notes,
+      year,
+      publishedAt: new Date().toISOString(),
+    };
+    setSyncMsg("Publication...");
+    try {
+      await sbSet("published_planning", snapshot);
+      setSyncMsg("Synchronisé ✓");
+      setPublishModal(false);
+      flash(`Planning publié — ${publishNbWeeks} semaine(s) visibles`);
+    } catch {
+      setSyncMsg("Erreur publication");
+      flash("Erreur lors de la publication","#c62828");
+    }
   };
 
   const chipName = n=> showFullNames ? (operators.find(o=>o.short===n)?.full||n) : n;
@@ -480,21 +617,36 @@ export default function App(){
       {/* Flash */}
       {flashMsg&&<div style={{position:"fixed",top:16,right:16,zIndex:9999,background:flashMsg.color,color:"#fff",padding:"10px 20px",borderRadius:8,fontSize:13,fontWeight:600,boxShadow:"0 4px 12px rgba(0,0,0,.2)"}}>{flashMsg.msg}</div>}
 
-      {/* Export modal */}
-      {exportModal&&(
+      {/* Modale Publier */}
+      {publishModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
-          <div style={{background:"#fff",borderRadius:12,width:560,maxWidth:"92vw",padding:24,boxShadow:"0 8px 40px rgba(0,0,0,.18)"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-              <span style={{fontWeight:600,fontSize:14}}>Données à copier</span>
-              <button onClick={()=>setExportModal(false)} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#666"}}>×</button>
+          <div style={{background:"#fff",borderRadius:12,width:420,maxWidth:"92vw",padding:24,boxShadow:"0 8px 40px rgba(0,0,0,.18)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <span style={{fontWeight:600,fontSize:15}}>📢 Publier le planning</span>
+              <button onClick={()=>setPublishModal(false)} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#666"}}>×</button>
             </div>
-            <textarea readOnly value={exportText()} style={{width:"100%",height:220,fontFamily:"monospace",fontSize:11,border:"1px solid #e0e0e0",borderRadius:6,padding:10,resize:"vertical",background:"#f8f8f7",color:"#000"}}/>
-            <div style={{display:"flex",gap:10,marginTop:12,alignItems:"center"}}>
-              <button onClick={()=>{const ta=document.querySelector("#export-ta");ta&&ta.select();document.execCommand("copy");flash("Copié !")}}
-                style={{background:BRAND,color:"#fff",border:"none",borderRadius:6,padding:"8px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>
-                Copier
-              </button>
-              <span style={{fontSize:11,color:"#888"}}>Collez dans une nouvelle conversation pour générer le fichier Excel.</span>
+            <p style={{fontSize:13,color:"#555",marginBottom:16,lineHeight:1.5}}>
+              Choisissez le nombre de semaines à rendre visibles via le lien partagé.<br/>
+              <strong>Les modifications en cours ne seront visibles qu'après publication.</strong>
+            </p>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+              <span style={{fontSize:13,fontWeight:500}}>Semaines visibles :</span>
+              {[2,3,4,5].map(n=>(
+                <button key={n} onClick={()=>setPublishNbWeeks(n)}
+                  style={{padding:"6px 14px",borderRadius:6,border:"1px solid #ccc",background:publishNbWeeks===n?BRAND:"#fff",color:publishNbWeeks===n?"#fff":"#333",cursor:"pointer",fontSize:13,fontWeight:publishNbWeeks===n?600:400}}>
+                  {n}
+                </button>
+              ))}
+            </div>
+            <div style={{background:"#f0f4ff",border:"1px solid #c5cae9",borderRadius:7,padding:"10px 12px",marginBottom:20,fontSize:12,color:"#555"}}>
+              🔗 Lien à partager :<br/>
+              <span style={{fontFamily:"monospace",fontSize:11,wordBreak:"break-all",color:BRAND}}>
+                {window.location.origin}/?view=planning
+              </span>
+            </div>
+            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+              <button onClick={()=>setPublishModal(false)} style={{padding:"8px 16px",borderRadius:7,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:13}}>Annuler</button>
+              <button onClick={publish} style={{padding:"8px 20px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>Publier</button>
             </div>
           </div>
         </div>
@@ -510,8 +662,8 @@ export default function App(){
               ↩ Annuler
             </button>
           )}
-          <button onClick={()=>setExportModal(true)} style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",borderRadius:6,cursor:"pointer",padding:"4px 12px",fontSize:12,color:"#fff"}}>
-            ↑ Exporter
+          <button onClick={()=>setPublishModal(true)} style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",borderRadius:6,cursor:"pointer",padding:"4px 12px",fontSize:12,color:"#fff"}}>
+            📢 Publier
           </button>
           <span style={{fontSize:11,opacity:.7}}>{syncMsg}</span>
         </div>
