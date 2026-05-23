@@ -445,7 +445,8 @@ export default function App(){
     setNewOp({prenom:"",nom:"",level:"N1"}); setShowAddOp(false);
     flash(`${op.full} ajouté${isVolant?" (volant N4 — glissement manuel)":""}`);
   };
-  const toggleActive = id=>saveOperators(operators.map(o=>o.id===id?{...o,active:!o.active}:o));
+  const toggleActive  = id=>saveOperators(operators.map(o=>o.id===id?{...o,active:!o.active}:o));
+  const toggleVolant  = id=>saveOperators(operators.map(o=>o.id===id?{...o,isVolant:!o.isVolant}:o));
   const deleteOp = id=>{if(window.confirm("Supprimer définitivement ?"))saveOperators(operators.filter(o=>o.id!==id));};
 
   const toggleSat = w=>saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
@@ -984,11 +985,19 @@ export default function App(){
                     </div>
                     <div>
                       <div style={{fontWeight:500,fontSize:14}}>{op.full}</div>
-                      <div style={{fontSize:12,color:"#888"}}>{op.active?"Actif":"Inactif"}</div>
+                      <div style={{fontSize:12,color:"#888",display:"flex",alignItems:"center",gap:6}}>
+                        {op.active?"Actif":"Inactif"}
+                        {op.isVolant&&<span style={{background:"#e8f5e9",color:"#2e7d32",borderRadius:3,padding:"1px 5px",fontSize:10,fontWeight:600}}>✋ Volant</span>}
+                      </div>
                     </div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <LevelBadge level={op.level}/>
+                    <button onClick={()=>toggleVolant(op.id)}
+                      style={{padding:"4px 12px",borderRadius:6,border:`1px solid ${op.isVolant?"#a5d6a7":"#ccc"}`,background:op.isVolant?"#e8f5e9":"#fff",cursor:"pointer",fontSize:12,color:op.isVolant?"#2e7d32":"#555"}}
+                      title={op.isVolant?"Retirer du mode volant (réintégrer au planning automatique)":"Passer en volant (exclu du planning auto, glissement manuel uniquement)"}>
+                      {op.isVolant?"✋ Volant":"Passer volant"}
+                    </button>
                     <button onClick={()=>toggleActive(op.id)} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:12,color:op.active?"#c62828":"#2e7d32"}}>
                       {op.active?"Désactiver":"Activer"}
                     </button>
