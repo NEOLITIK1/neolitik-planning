@@ -298,11 +298,8 @@ function PublicView() {
                       <div style={{display:"flex",flexDirection:"column",gap:3}}>
                         {ops_in.map(short=>{
                           const op = (operators||[]).find(o=>o.short===short);
-                          const lv = op?.level||"N1";
-                          const s  = LEVEL_BADGE[lv];
                           return(
-                            <span key={short} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12,fontWeight:500}}>
-                              <span style={{background:s.bg,color:s.color,borderRadius:3,padding:"1px 5px",fontSize:10}}>{lv}</span>
+                            <span key={short} style={{fontSize:12,fontWeight:500}}>
                               {op?.full||short}
                             </span>
                           );
@@ -316,15 +313,6 @@ function PublicView() {
           })}
         </div>
 
-        {/* Légende */}
-        <div style={{display:"flex",gap:12,marginTop:20,fontSize:11,color:"#888",flexWrap:"wrap"}}>
-          <span style={{background:"#D6EFD8",padding:"2px 8px",borderRadius:3}}>Matin</span>
-          <span style={{background:"#FFF9C4",padding:"2px 8px",borderRadius:3}}>AM</span>
-          <span style={{background:"#BBDEFB",padding:"2px 8px",borderRadius:3}}>Nuit</span>
-          {Object.values(LEVEL_BADGE).map((s,i)=>(
-            <span key={i} style={{background:s.bg,color:s.color,padding:"2px 8px",borderRadius:3}}>{"N"+(i+1)}</span>
-          ))}
-        </div>
       </div>
     </div>
   );
