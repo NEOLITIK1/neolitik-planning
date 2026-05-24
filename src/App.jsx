@@ -158,23 +158,35 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     const restN4   = activeN4.filter(o=>!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
     const restNon4 = activeNon4.filter(o=>!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
 
-    // Tri Matin : moins de matin, départage : plus de nuits (rééquilibrage)
+    // Tri équité : moins de ce poste d'abord, départage : plus de nuits
     const sortMat = (a,b)=> matCount[a.short]!==matCount[b.short]
       ? matCount[a.short]-matCount[b.short]
       : nightCount[b.short]-nightCount[a.short];
+    const sortAm = (a,b)=> amCount[a.short]!==amCount[b.short]
+      ? amCount[a.short]-amCount[b.short]
+      : nightCount[b.short]-nightCount[a.short];
 
-    restN4.sort(sortMat);
-    restNon4.sort(sortMat);
+    // Priorité AM : on remplit AM en premier pour garantir le minimum de 2
+    // N4 pour AM : le moins chargé en AM parmi les restants
+    const restN4ForAm = [...restN4].sort(sortAm);
+    const n4Am = restN4ForAm[0];
 
-    const n4Matin = restN4[0];
-    const n4Am    = restN4[1];
+    // Non-N4 pour AM : 1 minimum, trié par équité AM
+    const restNon4ForAm = [...restNon4].sort(sortAm);
+    const non4AmList = restNon4ForAm.slice(0, 1); // 1 non-N4 en AM
+
+    const am = [n4Am?.short, ...non4AmList.map(o=>o.short)].filter(Boolean);
+
+    // Matin : N4 restant (pas celui pris pour AM) + non-N4 restants
+    const n4Matin = restN4.filter(o=>o.short!==n4Am?.short).sort(sortMat)[0];
+    const non4Matin = restNon4
+      .filter(o=>!non4AmList.some(a=>a.short===o.short))
+      .sort(sortMat);
+
+    const matin = [n4Matin?.short, non4Matin[0]?.short, non4Matin[1]?.short].filter(Boolean);
 
     if(!n4Matin) alerts.push(`⛔ S${s} : aucun N4 disponible en matin — glissement manuel requis`);
     if(!n4Am)    alerts.push(`⛔ S${s} : aucun N4 disponible en AM — glissement manuel requis`);
-
-    const matin = [n4Matin?.short, restNon4[0]?.short, restNon4[1]?.short].filter(Boolean);
-    const am    = [n4Am?.short,    restNon4[2]?.short].filter(Boolean);
-
     if(matin.length<3) alerts.push(`⚠ S${s} : matin ${matin.length}/3`);
     if(am.length<2)    alerts.push(`⚠ S${s} : AM ${am.length}/2`);
 
@@ -536,10 +548,16 @@ export default function App(){
   const undoLast = ()=>{
     if(!history.length)return;
     const last=history[0],st=last.state;
-    if(st.operators){setOperators(st.operators);sbSetOps(st.operators);}
-    if(st.absences){setAbsences(st.absences);save("absences",st.absences);}
-    if(st.leaves){setLeaves(st.leaves);save("leaves",st.leaves);}
-    if(st.overrides){setOverrides(st.overrides);save("overrides",st.overrides);}
+    const newOps      = st.operators  || operators;
+    const newAbsences = st.absences   || absences;
+    const newLeaves   = st.leaves     || leaves;
+    const newOverrides= st.overrides  || overrides;
+    if(st.operators)  { setOperators(newOps);        sbSetOps(newOps); }
+    if(st.absences)   { setAbsences(newAbsences);    save("absences",  newAbsences); }
+    if(st.leaves)     { setLeaves(newLeaves);         save("leaves",    newLeaves); }
+    if(st.overrides)  { setOverrides(newOverrides);  save("overrides", newOverrides); }
+    // Recalcul immédiat avec les valeurs restaurées
+    recompute(newOps, newAbsences, newLeaves, newOverrides, weeks);
     const newH=history.slice(1); setHistory(newH); sbSet("history",newH);
     flash(`Annulé : ${last.label}`,"#c62828");
   };
