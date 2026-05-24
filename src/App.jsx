@@ -373,9 +373,9 @@ function PublicView() {
                       <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:150}}>Opérateur</th>
                       {days.map(({d,dateStr,isFerie,isSat})=>(
                         <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
-                          color:isFerie?"#c62828":isSat?"#e65100":"#666",minWidth:70}}>
+                          color:isSat?"#e65100":"#666",minWidth:70}}>
                           {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
-                          <span style={{display:"block",fontSize:10,fontWeight:400}}>{dateStr}{isFerie?" 🔴":""}</span>
+                          <span style={{display:"block",fontSize:10,fontWeight:400}}>{dateStr}{isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}</span>
                         </th>
                       ))}
                     </tr>
@@ -398,9 +398,9 @@ function PublicView() {
                               {days.map(({d,isFerie,isSat})=>{
                                 const isOff=isSat&&shiftIdx[key]>satEndIdx;
                                 return(
-                                  <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":isFerie?"#fff8f8":"transparent"}}>
-                                    <span style={{background:isOff?"#f5f5f5":isFerie?"#ffebee":bg,color:isOff?"#bbb":isFerie?"#c62828":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                      {isOff?"—":isFerie?`${key==="matin"?"M":key==="am"?"AM":"N"} 🔴`:key==="matin"?"M":key==="am"?"AM":"N"}
+                                  <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
+                                    <span style={{background:isOff?"#f5f5f5":bg,color:isOff?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                      {isOff?"—":key==="matin"?"M":key==="am"?"AM":"N"}{!isOff&&isFerie&&<span style={{fontSize:9,color:"#888",display:"block"}}>Férié</span>}
                                     </span>
                                   </td>
                                 );
@@ -419,9 +419,9 @@ function PublicView() {
                         <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
                           <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
                           {days.map(({d,isFerie})=>(
-                            <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isFerie?"#fff8f8":"transparent"}}>
-                              <span style={{background:isFerie?"#ffebee":"#EDE7F6",color:isFerie?"#c62828":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                {isFerie?"J 🔴":"J"}
+                            <td key={d} style={{padding:"4px 6px",textAlign:"center",background:transparent}}>
+                              <span style={{background:"#EDE7F6",color:"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                {isFerie?"J (Férié)":"J"}
                               </span>
                             </td>
                           ))}
@@ -1149,11 +1149,11 @@ export default function App(){
                             <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:160}}>Opérateur</th>
                             {days.map(({d,dateStr,isFerie,isSat})=>(
                               <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
-                                color:isFerie?"#c62828":isSat?"#e65100":"#666",
-                                background:isFerie?"#fff5f5":isSat?"#fff8f0":"transparent",
+                                color:isSat?"#e65100":"#666",
+                                background:isSat?"#fff8f0":"transparent",
                                 minWidth:80,whiteSpace:"nowrap"}}>
                                 {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
-                                <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>{dateStr}{isFerie?" 🔴":""}</span>
+                                <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>{dateStr}{isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}</span>
                               </th>
                             ))}
                           </tr>
@@ -1179,14 +1179,15 @@ export default function App(){
                                       {days.map(({d,isFerie,isSat})=>{
                                         // Samedi : vérifier si ce poste est autorisé
                                         const isOff=isSat&&shiftIdx[key]>satEndIdx;
-                                        const chipBg=isOff?"#f5f5f5":isFerie?"#ffebee":bg;
-                                        const chipTc=isOff?"#bbb":isFerie?"#c62828":tc;
-                                        const label=isOff?"—":isFerie?`${key==="matin"?"M":key==="am"?"AM":"N"} 🔴`:key==="matin"?"M":key==="am"?"AM":"N";
+                                        const chipBg=isOff?"#f5f5f5":bg;
+                                        const chipTc=isOff?"#bbb":tc;
+                                        const postLabel=key==="matin"?"M":key==="am"?"AM":"N";
                                         return(
-                                          <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":isFerie?"#fff8f8":"transparent"}}>
+                                          <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
                                             <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
-                                              {label}
+                                              {isOff?"—":postLabel}
                                             </span>
+                                            {!isOff&&isFerie&&<span style={{display:"block",fontSize:9,color:"#888",marginTop:1}}>Férié</span>}
                                           </td>
                                         );
                                       })}
@@ -1217,17 +1218,15 @@ export default function App(){
                                     {days.map(({d,isFerie,isSat})=>{
                                       // Si le volant est dans le planning, son poste est déjà affiché dans son groupe
                                       // Sinon : Journée tous les jours (+ samedi si activé, toujours)
-                                      const chipBg=isFerie?"#ffebee":"#EDE7F6";
-                                      const chipTc=isFerie?"#c62828":"#4527A0";
-                                      const label=isFerie?"J 🔴":"J";
+                                      const chipBg="#EDE7F6";
+                                      const chipTc="#4527A0";
                                       if(inPlanning){
                                         return <td key={d} style={{padding:"4px 6px",textAlign:"center"}}><span style={{color:"#bbb",fontSize:11}}>—</span></td>;
                                       }
                                       return(
-                                        <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":isFerie?"#fff8f8":"transparent"}}>
-                                          <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
-                                            {label}
-                                          </span>
+                                        <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
+                                          <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>J</span>
+                                          {isFerie&&<span style={{display:"block",fontSize:9,color:"#888",marginTop:1}}>Férié</span>}
                                         </td>
                                       );
                                     })}
