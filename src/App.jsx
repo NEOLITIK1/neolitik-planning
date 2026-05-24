@@ -398,7 +398,7 @@ export default function App(){
   },[]);
 
   // ── CALCUL PLANNING
-  const recompute = useCallback((ops,abs,lv,ov,wks)=>{
+  const recompute = (ops,abs,lv,ov,wks)=>{
     const {schedules:sc,nightCount,matCount,amCount} = buildSchedules(ops,wks[0],wks.length,abs,lv,ov);
     setSchedules(sc);
     const eq = ops.filter(o=>o.active).map(op=>({
@@ -409,7 +409,7 @@ export default function App(){
       total:(matCount[op.short]||0)+(amCount[op.short]||0)+(nightCount[op.short]||0),
     }));
     setEquity(eq);
-  },[]);
+  };
 
   // Recalcul automatique uniquement sur changements structurels
   // (opérateurs, absences, congés, période) — PAS sur les overrides
