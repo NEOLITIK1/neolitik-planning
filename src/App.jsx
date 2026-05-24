@@ -354,7 +354,8 @@ function PublicView() {
           const days=Array.from({length:numDays},(_,d)=>{
             const date=new Date(m); date.setDate(m.getDate()+d);
             const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
-            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5};
+            const isChome=!!((joursChomes||{})[`${sc.s}-${dateStr}`]);
+            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5,isChome};
           });
           const note=(notes||{})[sc.s];
           const end=new Date(m); end.setDate(m.getDate()+(numDays-1));
@@ -371,11 +372,16 @@ function PublicView() {
                   <thead>
                     <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
                       <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:150}}>Opérateur</th>
-                      {days.map(({d,dateStr,isFerie,isSat})=>(
+                      {days.map(({d,dateStr,isFerie,isSat,isChome})=>(
                         <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
-                          color:isSat?"#e65100":"#666",minWidth:70}}>
+                          color:isChome?"#aaa":isSat?"#e65100":"#666",minWidth:70,
+                          opacity:isChome?.5:1}}>
                           {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
-                          <span style={{display:"block",fontSize:10,fontWeight:400}}>{dateStr}{isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}</span>
+                          <span style={{display:"block",fontSize:10,fontWeight:400}}>
+                            {dateStr}
+                            {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
+                          </span>
+                          {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
                         </th>
                       ))}
                     </tr>
@@ -396,14 +402,13 @@ function PublicView() {
                             return(
                               <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
                                 <td style={{padding:"5px 10px",fontWeight:500}}>{op?.full||short}</td>
-                                {days.map(({d,isFerie,isSat})=>{
+                                {days.map(({d,isSat,isChome})=>{
                                   const isOff=isSat&&shiftIdx[key]>satEndIdx;
                                   return(
-                                    <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
-                                      <span style={{background:isOff?"#f5f5f5":bg,color:isOff?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                        {isOff?"—":key==="matin"?"M":key==="am"?"AM":"N"}
+                                    <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent"}}>
+                                      <span style={{background:isOff||isChome?"#f5f5f5":bg,color:isOff||isChome?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                        {isOff||isChome?"—":key==="matin"?"M":key==="am"?"AM":"N"}
                                       </span>
-                                      {!isOff&&isFerie&&<span style={{fontSize:9,color:"#888",display:"block",marginTop:1}}>Férié</span>}
                                     </td>
                                   );
                                 })}
@@ -422,10 +427,11 @@ function PublicView() {
                           <tr><td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0"}}>☀️ Journée</td></tr>
                           <tr style={{borderBottom:"0.5px solid #f5f5f5"}}>
                             <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
-                            {days.map(({d,isFerie})=>(
-                              <td key={d} style={{padding:"4px 6px",textAlign:"center"}}>
-                                <span style={{background:"#EDE7F6",color:"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>J</span>
-                                {isFerie&&<span style={{display:"block",fontSize:9,color:"#888",marginTop:1}}>Férié</span>}
+                            {days.map(({d,isChome})=>(
+                              <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":"transparent"}}>
+                                <span style={{background:isChome?"#f5f5f5":"#EDE7F6",color:isChome?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                  {isChome?"—":"J"}
+                                </span>
                               </td>
                             ))}
                           </tr>
@@ -456,6 +462,7 @@ export default function App(){
   const [overrides,setOverrides] = useState({}); // { semaine: {matin,am,nuit} }
   const [satWeeks,setSatWeeks]       = useState([]);
   const [satEndPostes,setSatEndPostes] = useState({}); // { [semaine]: "M"|"AM"|"N" }
+  const [joursChomes,setJoursChomes]   = useState({}); // { "semaine-dateStr": true } jour chômé = toute l'équipe absente
   const [notes,setNotes]             = useState({});
   const [year,setYear]           = useState(2026);
   const [history,setHistory]     = useState([]);
@@ -490,13 +497,13 @@ export default function App(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,sw,sep,nt,hi,yr]=await Promise.all([
+        const [ops,abs,lv,ov,sw,sep,jc,nt,hi,yr]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),
-          sbGet("satweeks"),sbGet("satendpostes"),sbGet("notes"),sbGet("history"),sbGet("year"),
+          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("notes"),sbGet("history"),sbGet("year"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
         if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov);
-        if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep);
+        if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep); if(jc)setJoursChomes(jc);
         if(nt)setNotes(nt); if(hi)setHistory(hi);
         if(yr)setYear(Number(yr));
         setSyncMsg("Synchronisé ✓");
@@ -517,6 +524,7 @@ export default function App(){
   const saveOverrides   = useCallback(v=>{setOverrides(v);   save("overrides",v);},[save]);
   const saveSatWeeks    = useCallback(v=>{setSatWeeks(v);    save("satweeks",v);},[save]);
   const saveSatEndPostes= useCallback(v=>{setSatEndPostes(v);save("satendpostes",v);},[save]);
+  const saveJoursChomes = useCallback(v=>{setJoursChomes(v);save("jourschomes",v);},[save]);
   const saveNotes       = useCallback(v=>{setNotes(v);       save("notes",v);},[save]);
   const saveYear        = useCallback(v=>{setYear(v);        save("year",String(v));},[save]);
 
@@ -700,6 +708,24 @@ export default function App(){
   // Semaine verrouillée : strictement inférieure à la semaine courante
   const isWeekLocked = w => w < currentWeek;
 
+  const toggleJourChome = (weekNum, dateStr) => {
+    if(isWeekLocked(weekNum)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    const key=`${weekNum}-${dateStr}`;
+    const next={...joursChomes};
+    if(next[key]) delete next[key]; else next[key]=true;
+    saveJoursChomes(next);
+  };
+
+  const toggleAbsJour = (weekNum, opShort, dateStr, dayLabel) => {
+    if(isWeekLocked(weekNum)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    const entry=`${opShort}|${weekNum}|${dayLabel}`;
+    const cur=(absences[weekNum]||[]);
+    const exists=cur.includes(entry);
+    const next={...absences,[weekNum]:exists?cur.filter(e=>e!==entry):[...cur,entry]};
+    if(next[weekNum]&&!next[weekNum].length)delete next[weekNum];
+    saveAbsences(next);
+  };
+
   const toggleSat = w=>{
     if(isWeekLocked(w)){flash("Semaine écoulée — modification impossible","#c62828");return;}
     saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
@@ -717,6 +743,7 @@ export default function App(){
       operators: operators.filter(o=>o.active),
       satWeeks,
       satEndPostes,
+      joursChomes,
       notes,
       year,
       publishView,
@@ -1104,7 +1131,8 @@ export default function App(){
                     const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
                     const isFerie=feriesDates.includes(dateStr);
                     const isSat=d===5;
-                    return{d,date,dateStr,isFerie,isSat};
+                    const isChome=!!joursChomes[`${sc.s}-${dateStr}`];
+                    return{d,date,dateStr,isFerie,isSat,isChome};
                   });
 
                   // Opérateurs groupés par poste
@@ -1150,14 +1178,26 @@ export default function App(){
                       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                         <thead>
                           <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
-                            <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:160}}>Opérateur</th>
-                            {days.map(({d,dateStr,isFerie,isSat})=>(
-                              <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
-                                color:isSat?"#e65100":"#666",
-                                background:isSat?"#fff8f0":"transparent",
-                                minWidth:80,whiteSpace:"nowrap"}}>
+                            <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:160}}>
+                              Opérateur
+                              {!locked&&<span style={{display:"block",fontSize:9,color:"#bbb",fontWeight:400}}>clic cellule = absent ce jour</span>}
+                            </th>
+                            {days.map(({d,dateStr,isFerie,isSat,isChome})=>(
+                              <th key={d}
+                                onClick={()=>!locked&&toggleJourChome(sc.s,dateStr)}
+                                style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
+                                  color:isChome?"#888":isSat?"#e65100":"#666",
+                                  background:isChome?"#f5f5f5":isSat?"#fff8f0":"transparent",
+                                  minWidth:80,whiteSpace:"nowrap",
+                                  cursor:locked?"default":"pointer",
+                                  opacity:isChome?.5:1}}>
                                 {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
-                                <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>{dateStr}{isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}</span>
+                                <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>
+                                  {dateStr}
+                                  {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
+                                </span>
+                                {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
+                                {!locked&&!isChome&&<span style={{display:"block",fontSize:8,color:"#ccc",fontWeight:400}}>clic = chômer</span>}
                               </th>
                             ))}
                           </tr>
@@ -1180,18 +1220,24 @@ export default function App(){
                                         <span style={{fontWeight:500}}>{showFullNames?(op?.full||short):short}</span>
                                         <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op?.level||"N1"}</span>
                                       </td>
-                                      {days.map(({d,isFerie,isSat})=>{
-                                        // Samedi : vérifier si ce poste est autorisé
+                                      {days.map(({d,isSat,isChome,dateStr})=>{
                                         const isOff=isSat&&shiftIdx[key]>satEndIdx;
-                                        const chipBg=isOff?"#f5f5f5":bg;
-                                        const chipTc=isOff?"#bbb":tc;
+                                        const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
+                                        const absKey=`${short}|${sc.s}|${dayLabel}`;
+                                        const isAbsent=(absences[sc.s]||[]).includes(absKey);
+                                        const chipBg=isOff||isChome||isAbsent?"#f5f5f5":bg;
+                                        const chipTc=isOff||isChome||isAbsent?"#bbb":tc;
                                         const postLabel=key==="matin"?"M":key==="am"?"AM":"N";
                                         return(
-                                          <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
+                                          <td key={d}
+                                            onClick={()=>!locked&&!isOff&&!isChome&&toggleAbsJour(sc.s,short,dateStr,dayLabel)}
+                                            style={{padding:"4px 6px",textAlign:"center",
+                                              background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent",
+                                              cursor:locked||isOff||isChome?"default":"pointer"}}>
                                             <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
-                                              {isOff?"—":postLabel}
+                                              {isOff||isChome||isAbsent?"—":postLabel}
                                             </span>
-                                            {!isOff&&isFerie&&<span style={{display:"block",fontSize:9,color:"#888",marginTop:1}}>Férié</span>}
+                                            {isAbsent&&!isChome&&!isOff&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
                                           </td>
                                         );
                                       })}
@@ -1210,7 +1256,6 @@ export default function App(){
                               </tr>
                               {volantsList.map(op=>{
                                 const lv=LEVEL_BADGE[op.level||"N1"];
-                                // Vérifier si le volant est dans le planning cette semaine
                                 const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
                                 return(
                                   <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
@@ -1219,18 +1264,23 @@ export default function App(){
                                       <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op.level}</span>
                                       {inPlanning&&<span style={{background:"#e8f5e9",color:"#2e7d32",borderRadius:3,padding:"1px 4px",fontSize:9,marginLeft:3}}>planning</span>}
                                     </td>
-                                    {days.map(({d,isFerie,isSat})=>{
-                                      // Si le volant est dans le planning, son poste est déjà affiché dans son groupe
-                                      // Sinon : Journée tous les jours (+ samedi si activé, toujours)
-                                      const chipBg="#EDE7F6";
-                                      const chipTc="#4527A0";
+                                    {days.map(({d,isSat,isChome,dateStr})=>{
+                                      const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
+                                      const absKey=`${op.short}|${sc.s}|${dayLabel}`;
+                                      const isAbsent=(absences[sc.s]||[]).includes(absKey);
                                       if(inPlanning){
                                         return <td key={d} style={{padding:"4px 6px",textAlign:"center"}}><span style={{color:"#bbb",fontSize:11}}>—</span></td>;
                                       }
                                       return(
-                                        <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
-                                          <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>J</span>
-                                          {isFerie&&<span style={{display:"block",fontSize:9,color:"#888",marginTop:1}}>Férié</span>}
+                                        <td key={d}
+                                          onClick={()=>!locked&&!isChome&&toggleAbsJour(sc.s,op.short,dateStr,dayLabel)}
+                                          style={{padding:"4px 6px",textAlign:"center",
+                                            background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent",
+                                            cursor:locked||isChome?"default":"pointer"}}>
+                                          <span style={{background:isChome||isAbsent?"#f5f5f5":"#EDE7F6",color:isChome||isAbsent?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
+                                            {isChome||isAbsent?"—":"J"}
+                                          </span>
+                                          {isAbsent&&!isChome&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
                                         </td>
                                       );
                                     })}
