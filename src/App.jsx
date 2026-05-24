@@ -281,7 +281,7 @@ function PublicView() {
     </div>
   );
 
-  const {schedules, operators, satWeeks, satEndPostes, notes, publishedAt, year, publishView} = data;
+  const {schedules, operators, satWeeks, satEndPostes, joursChomes, notes, publishedAt, year, publishView} = data;
   const SMETA = [
     {key:"matin",label:"🌅 Matin 5h50–14h", hbg:"#D6EFD8",tc:"#1B5E20"},
     {key:"am",   label:"🌆 AM 13h50–22h",   hbg:"#FFF9C4",tc:"#F57F17"},
@@ -375,7 +375,7 @@ function PublicView() {
                       {days.map(({d,dateStr,isFerie,isSat,isChome})=>(
                         <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
                           color:isChome?"#aaa":isSat?"#e65100":"#666",minWidth:70,
-                          opacity:isChome?.5:1}}>
+                          opacity:isChome?0.5:1}}>
                           {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
                           <span style={{display:"block",fontSize:10,fontWeight:400}}>
                             {dateStr}
@@ -1190,7 +1190,7 @@ export default function App(){
                                   background:isChome?"#f5f5f5":isSat?"#fff8f0":"transparent",
                                   minWidth:80,whiteSpace:"nowrap",
                                   cursor:locked?"default":"pointer",
-                                  opacity:isChome?.5:1}}>
+                                  opacity:isChome?0.5:1}}>
                                 {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
                                 <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>
                                   {dateStr}
