@@ -227,6 +227,29 @@ function OpChip({name,operators,draggable,onDragStart,highlight}){
   );
 }
 
+// Jours fériés français (fixes + calcul Pâques pour mobiles)
+function getEaster(year) {
+  const a=year%19,b=Math.floor(year/100),c=year%100;
+  const d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25);
+  const g=Math.floor((b-f+1)/3),h=(19*a+b-d-g+15)%30;
+  const i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7;
+  const m=Math.floor((a+11*h+22*l)/451);
+  const month=Math.floor((h+l-7*m+114)/31);
+  const day=((h+l-7*m+114)%31)+1;
+  return new Date(year,month-1,day);
+}
+function getFeries(year) {
+  const easter=getEaster(year);
+  const add=(d,n)=>{const x=new Date(d);x.setDate(x.getDate()+n);return x;};
+  const fmt=d=>`${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`;
+  return [
+    `01/01`,`01/05`,`08/05`,`14/07`,`15/08`,`01/11`,`11/11`,`25/12`,
+    fmt(add(easter,1)),   // Lundi de Pâques
+    fmt(add(easter,39)),  // Ascension
+    fmt(add(easter,50)),  // Lundi de Pentecôte
+  ];
+}
+
 // ── VUE PUBLIQUE (lecture seule) ─────────────────────────────────────────────
 function PublicView() {
   const [data, setData]     = useState(null);
@@ -258,7 +281,7 @@ function PublicView() {
     </div>
   );
 
-  const {schedules, operators, satWeeks, notes, publishedAt, year} = data;
+  const {schedules, operators, satWeeks, satEndPostes, notes, publishedAt, year, publishView} = data;
   const SMETA = [
     {key:"matin",label:"🌅 Matin 5h50–14h", hbg:"#D6EFD8",tc:"#1B5E20"},
     {key:"am",   label:"🌆 AM 13h50–22h",   hbg:"#FFF9C4",tc:"#F57F17"},
@@ -281,49 +304,136 @@ function PublicView() {
           </div>
         )}
 
-        {/* Vue colonnes */}
-        <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8}}>
-          {schedules.map(sc=>{
-            const hasSat = (satWeeks||[]).includes(sc.s);
-            const note   = (notes||{})[sc.s];
-            const m = getMondayOfWeek(sc.s, year||2026);
-            const end = new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
-
-            return(
-              <div key={sc.s} style={{minWidth:200,flex:"0 0 200px",background:"#fff",border:"1px solid #e0e0e0",borderRadius:10,overflow:"hidden"}}>
-                {/* Header semaine */}
-                <div style={{background:BRAND,color:"#fff",padding:"10px 14px"}}>
-                  <div style={{fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:6}}>
-                    S{sc.s}
-                    {hasSat&&<span style={{background:"#c62828",borderRadius:3,padding:"1px 6px",fontSize:10}}>🔴 Sam.</span>}
+        {/* Vue Colonnes */}
+        {(publishView||"colonnes")==="colonnes"&&(
+          <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8}}>
+            {schedules.map(sc=>{
+              const hasSat=(satWeeks||[]).includes(sc.s);
+              const note=(notes||{})[sc.s];
+              const m=getMondayOfWeek(sc.s,year||2026);
+              const end=new Date(m); end.setDate(m.getDate()+(hasSat?5:4));
+              return(
+                <div key={sc.s} style={{minWidth:200,flex:"0 0 200px",background:"#fff",border:"1px solid #e0e0e0",borderRadius:10,overflow:"hidden"}}>
+                  <div style={{background:BRAND,color:"#fff",padding:"10px 14px"}}>
+                    <div style={{fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:6}}>
+                      S{sc.s}
+                      {hasSat&&<span style={{background:"#c62828",borderRadius:3,padding:"1px 6px",fontSize:10}}>🔴 Sam.</span>}
+                    </div>
+                    <div style={{fontSize:11,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}</div>
+                    {note&&<div style={{marginTop:4,fontSize:11,background:"rgba(255,255,255,.15)",borderRadius:4,padding:"2px 6px"}}>{note}</div>}
                   </div>
-                  <div style={{fontSize:11,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}</div>
-                  {note&&<div style={{marginTop:4,fontSize:11,background:"rgba(255,255,255,.15)",borderRadius:4,padding:"2px 6px"}}>{note}</div>}
+                  {SMETA.map(sh=>{
+                    const ops_in=sc[sh.key]||[];
+                    return(
+                      <div key={sh.key} style={{background:sh.hbg,padding:"8px 10px",borderBottom:"1px solid rgba(0,0,0,.06)"}}>
+                        <div style={{fontSize:10,fontWeight:600,color:sh.tc,marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>{sh.label}</div>
+                        <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                          {ops_in.map(short=>{
+                            const op=(operators||[]).find(o=>o.short===short);
+                            return <span key={short} style={{fontSize:12,fontWeight:500}}>{op?.full||short}</span>;
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
+              );
+            })}
+          </div>
+        )}
 
-                {/* Postes */}
-                {SMETA.map(sh=>{
-                  const ops_in = sc[sh.key]||[];
-                  return(
-                    <div key={sh.key} style={{background:sh.hbg,padding:"8px 10px",borderBottom:"1px solid rgba(0,0,0,.06)"}}>
-                      <div style={{fontSize:10,fontWeight:600,color:sh.tc,marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>{sh.label}</div>
-                      <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                        {ops_in.map(short=>{
-                          const op = (operators||[]).find(o=>o.short===short);
+        {/* Vue Jours */}
+        {publishView==="jours"&&schedules.map(sc=>{
+          const hasSat=(satWeeks||[]).includes(sc.s);
+          const weekSatEnd=(satEndPostes||{})[sc.s]||"N";
+          const satEndIdx={M:0,AM:1,N:2}[weekSatEnd];
+          const shiftIdx={matin:0,am:1,nuit:2};
+          const m=getMondayOfWeek(sc.s,year||2026);
+          const numDays=hasSat?6:5;
+          const feriesDates=getFeries(year||2026);
+          const days=Array.from({length:numDays},(_,d)=>{
+            const date=new Date(m); date.setDate(m.getDate()+d);
+            const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
+            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5};
+          });
+          const note=(notes||{})[sc.s];
+          const end=new Date(m); end.setDate(m.getDate()+(numDays-1));
+          return(
+            <div key={sc.s} style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",marginBottom:14,overflow:"hidden"}}>
+              <div style={{background:BRAND,color:"#fff",padding:"8px 14px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <span style={{fontWeight:700,fontSize:14}}>S{sc.s}</span>
+                <span style={{fontSize:12,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}</span>
+                {hasSat&&<span style={{fontSize:11,background:"rgba(255,255,255,.2)",borderRadius:3,padding:"1px 6px"}}>Sam. ↳ {weekSatEnd==="M"?"Matin":weekSatEnd==="AM"?"AM":"Nuit"}</span>}
+                {note&&<span style={{fontSize:11,opacity:.8,marginLeft:"auto"}}>{note}</span>}
+              </div>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
+                      <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:150}}>Opérateur</th>
+                      {days.map(({d,dateStr,isFerie,isSat})=>(
+                        <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
+                          color:isFerie?"#c62828":isSat?"#e65100":"#666",minWidth:70}}>
+                          {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
+                          <span style={{display:"block",fontSize:10,fontWeight:400}}>{dateStr}{isFerie?" 🔴":""}</span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[
+                      {key:"matin",label:"🌅 Matin",bg:"#D6EFD8",tc:"#1B5E20"},
+                      {key:"am",   label:"🌆 AM",   bg:"#FFF9C4",tc:"#F57F17"},
+                      {key:"nuit", label:"🌙 Nuit",  bg:"#BBDEFB",tc:"#0D47A1"},
+                    ].map(({key,label,bg,tc})=>{
+                      const opsIn=sc[key]||[];
+                      if(!opsIn.length)return null;
+                      return(<>
+                        <tr key={`h-${key}`}><td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc}}>{label}</td></tr>
+                        {opsIn.map(short=>{
+                          const op=(operators||[]).find(o=>o.short===short);
                           return(
-                            <span key={short} style={{fontSize:12,fontWeight:500}}>
-                              {op?.full||short}
-                            </span>
+                            <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
+                              <td style={{padding:"5px 10px",fontWeight:500}}>{op?.full||short}</td>
+                              {days.map(({d,isFerie,isSat})=>{
+                                const isOff=isSat&&shiftIdx[key]>satEndIdx;
+                                return(
+                                  <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":isFerie?"#fff8f8":"transparent"}}>
+                                    <span style={{background:isOff?"#f5f5f5":isFerie?"#ffebee":bg,color:isOff?"#bbb":isFerie?"#c62828":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                      {isOff?"—":isFerie?`${key==="matin"?"M":key==="am"?"AM":"N"} 🔴`:key==="matin"?"M":key==="am"?"AM":"N"}
+                                    </span>
+                                  </td>
+                                );
+                              })}
+                            </tr>
                           );
                         })}
-                      </div>
-                    </div>
-                  );
-                })}
+                      </>);
+                    })}
+                    {/* Volants en journée */}
+                    {(operators||[]).filter(o=>o.isVolant&&o.active).map(op=>{
+                      const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
+                      if(inPlanning)return null;
+                      return(<>
+                        <tr key={`hv`}><td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0"}}>☀️ Journée</td></tr>
+                        <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
+                          <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
+                          {days.map(({d,isFerie})=>(
+                            <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isFerie?"#fff8f8":"transparent"}}>
+                              <span style={{background:isFerie?"#ffebee":"#EDE7F6",color:isFerie?"#c62828":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                {isFerie?"J 🔴":"J"}
+                              </span>
+                            </td>
+                          ))}
+                        </tr>
+                      </>);
+                    })}
+                  </tbody>
+                </table>
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
 
       </div>
     </div>
@@ -340,13 +450,15 @@ export default function App(){
   const [absences,setAbsences]   = useState({});
   const [leaves,setLeaves]       = useState({});
   const [overrides,setOverrides] = useState({}); // { semaine: {matin,am,nuit} }
-  const [satWeeks,setSatWeeks]   = useState([]);
-  const [notes,setNotes]         = useState({});
+  const [satWeeks,setSatWeeks]       = useState([]);
+  const [satEndPostes,setSatEndPostes] = useState({}); // { [semaine]: "M"|"AM"|"N" }
+  const [notes,setNotes]             = useState({});
   const [year,setYear]           = useState(2026);
   const [history,setHistory]     = useState([]);
   const [startWeek,setStartWeek] = useState(22);
   const [numWeeks,setNumWeeks]   = useState(5);
   const [view,setView]           = useState("liste");
+  const [publishView,setPublishView] = useState("colonnes"); // vue publiée : colonnes ou jours
   const [showFullNames,setShowFullNames] = useState(false);
   const [highlightOp,setHighlightOp]     = useState(null);
   const [absOp,setAbsOp]   = useState(""); const [absWeek,setAbsWeek]   = useState(22); const [absDay,setAbsDay]   = useState(0);
@@ -374,13 +486,14 @@ export default function App(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,sw,nt,hi,yr]=await Promise.all([
+        const [ops,abs,lv,ov,sw,sep,nt,hi,yr]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),
-          sbGet("satweeks"),sbGet("notes"),sbGet("history"),sbGet("year"),
+          sbGet("satweeks"),sbGet("satendpostes"),sbGet("notes"),sbGet("history"),sbGet("year"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
         if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov);
-        if(sw)setSatWeeks(sw); if(nt)setNotes(nt); if(hi)setHistory(hi);
+        if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep);
+        if(nt)setNotes(nt); if(hi)setHistory(hi);
         if(yr)setYear(Number(yr));
         setSyncMsg("Synchronisé ✓");
       }catch(e){setSyncMsg(`Erreur: ${e.message}`);}
@@ -394,13 +507,14 @@ export default function App(){
     catch{setSyncMsg("Erreur sync");}
   },[]);
 
-  const saveOperators = useCallback(v=>{setOperators(v);sbSetOps(v).then(()=>setSyncMsg("Synchronisé ✓")).catch(()=>setSyncMsg("Erreur sync"));},[]);
-  const saveAbsences  = useCallback(v=>{setAbsences(v); save("absences",v);},[save]);
-  const saveLeaves    = useCallback(v=>{setLeaves(v);   save("leaves",v);},[save]);
-  const saveOverrides = useCallback(v=>{setOverrides(v);save("overrides",v);},[save]);
-  const saveSatWeeks  = useCallback(v=>{setSatWeeks(v); save("satweeks",v);},[save]);
-  const saveNotes     = useCallback(v=>{setNotes(v);    save("notes",v);},[save]);
-  const saveYear      = useCallback(v=>{setYear(v);     save("year",String(v));},[save]);
+  const saveOperators   = useCallback(v=>{setOperators(v);sbSetOps(v).then(()=>setSyncMsg("Synchronisé ✓")).catch(()=>setSyncMsg("Erreur sync"));},[]);
+  const saveAbsences    = useCallback(v=>{setAbsences(v);    save("absences",v);},[save]);
+  const saveLeaves      = useCallback(v=>{setLeaves(v);      save("leaves",v);},[save]);
+  const saveOverrides   = useCallback(v=>{setOverrides(v);   save("overrides",v);},[save]);
+  const saveSatWeeks    = useCallback(v=>{setSatWeeks(v);    save("satweeks",v);},[save]);
+  const saveSatEndPostes= useCallback(v=>{setSatEndPostes(v);save("satendpostes",v);},[save]);
+  const saveNotes       = useCallback(v=>{setNotes(v);       save("notes",v);},[save]);
+  const saveYear        = useCallback(v=>{setYear(v);        save("year",String(v));},[save]);
 
   const pushHistory = useCallback((label,state)=>{
     setHistory(prev=>{
@@ -449,6 +563,7 @@ export default function App(){
   // ── ABSENCES
   const addAbsence = ()=>{
     if(!absOp)return;
+    if(isWeekLocked(absWeek)){flash("Semaine écoulée — modification impossible","#c62828");return;}
     pushHistory(`Absence: ${absOp} S${absWeek}`,{absences});
     const entry = absDay===0 ? absOp : `${absOp}|${absWeek}|${DAYS_FR[absDay]}`;
     const cur=(absences[absWeek]||[]).filter(e=>{
@@ -501,6 +616,7 @@ export default function App(){
 
     const cur = schedules.find(s=>s.s===week);
     if(!cur){ dragRef.current=null; return; }
+    if(isWeekLocked(week)){flash("Semaine écoulée — modification impossible","#c62828");dragRef.current=null;return;}
 
     const existing = overrides[week]||{matin:[...cur.matin],am:[...cur.am],nuit:[...cur.nuit]};
 
@@ -577,18 +693,29 @@ export default function App(){
   const toggleVolant  = id=>saveOperators(operators.map(o=>o.id===id?{...o,isVolant:!o.isVolant}:o));
   const deleteOp = id=>{if(window.confirm("Supprimer définitivement ?"))saveOperators(operators.filter(o=>o.id!==id));};
 
-  const toggleSat = w=>saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
+  // Semaine verrouillée : strictement inférieure à la semaine courante
+  const isWeekLocked = w => w < currentWeek;
 
-  // ── EXPORT
+  const toggleSat = w=>{
+    if(isWeekLocked(w)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    saveSatWeeks(satWeeks.includes(w)?satWeeks.filter(x=>x!==w):[...satWeeks,w]);
+  };
+  const setSatEndForWeek = (w,v)=>{
+    if(isWeekLocked(w)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    saveSatEndPostes({...satEndPostes,[w]:v});
+  };
+
+  // ── PUBLICATION
   const publish = async()=>{
-    // Prendre les N premières semaines du planning courant
     const toPublish = schedules.slice(0, publishNbWeeks);
     const snapshot = {
       schedules: toPublish,
       operators: operators.filter(o=>o.active),
       satWeeks,
+      satEndPostes,
       notes,
       year,
+      publishView,
       publishedAt: new Date().toISOString(),
     };
     setSyncMsg("Publication...");
@@ -596,10 +723,10 @@ export default function App(){
       await sbSet("published_planning", snapshot);
       setSyncMsg("Synchronisé ✓");
       setPublishModal(false);
-      flash(`Planning publié — ${publishNbWeeks} semaine(s) visibles`);
-    } catch {
+      flash(`Planning publié — ${publishNbWeeks} semaine(s) en vue ${publishView==="jours"?"Jours":"Colonnes"}`);
+    } catch(e) {
       setSyncMsg("Erreur publication");
-      flash("Erreur lors de la publication","#c62828");
+      flash(`Erreur publication : ${e?.message||"inconnue"}`,"#c62828");
     }
   };
 
@@ -635,12 +762,21 @@ export default function App(){
               Choisissez le nombre de semaines à rendre visibles via le lien partagé.<br/>
               <strong>Les modifications en cours ne seront visibles qu'après publication.</strong>
             </p>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
               <span style={{fontSize:13,fontWeight:500}}>Semaines visibles :</span>
               {[2,3,4,5].map(n=>(
                 <button key={n} onClick={()=>setPublishNbWeeks(n)}
                   style={{padding:"6px 14px",borderRadius:6,border:"1px solid #ccc",background:publishNbWeeks===n?BRAND:"#fff",color:publishNbWeeks===n?"#fff":"#333",cursor:"pointer",fontSize:13,fontWeight:publishNbWeeks===n?600:400}}>
                   {n}
+                </button>
+              ))}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+              <span style={{fontSize:13,fontWeight:500}}>Vue publiée :</span>
+              {[{v:"colonnes",l:"🗂 Colonnes"},{v:"jours",l:"📆 Jours"}].map(({v,l})=>(
+                <button key={v} onClick={()=>setPublishView(v)}
+                  style={{padding:"6px 14px",borderRadius:6,border:"1px solid #ccc",background:publishView===v?BRAND:"#fff",color:publishView===v?"#fff":"#333",cursor:"pointer",fontSize:13,fontWeight:publishView===v?600:400}}>
+                  {l}
                 </button>
               ))}
             </div>
@@ -713,7 +849,7 @@ export default function App(){
                   title="Absorbe les ajustements manuels et repart de l'algorithme">
                   🔄 Recalculer
                 </button>
-                {[{k:"liste",l:"📋 Liste"},{k:"colonnes",l:"🗂 Colonnes"}].map(v=>(
+                {[{k:"liste",l:"📋 Liste"},{k:"colonnes",l:"🗂 Colonnes"},{k:"jours",l:"📆 Jours"}].map(v=>(
                   <button key={v.k} onClick={()=>setView(v.k)} style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:view===v.k?BRAND:"#fff",color:view===v.k?"#fff":"#333",cursor:"pointer",fontSize:13}}>{v.l}</button>
                 ))}
                 <button onClick={()=>setShowFullNames(p=>!p)} style={{padding:"5px 10px",borderRadius:6,border:"1px solid #ccc",background:showFullNames?"#e8f5e9":"#fff",cursor:"pointer",fontSize:13}}>
@@ -860,13 +996,30 @@ export default function App(){
                             );
                           })}
                           <td style={{padding:"8px",textAlign:"center"}}>
-                            <button onClick={()=>toggleSat(sc.s)} style={{background:hasSat?"#fdecea":"#f5f5f5",border:`1px solid ${hasSat?"#ef9a9a":"#ccc"}`,borderRadius:6,cursor:"pointer",padding:"4px 8px",fontSize:12,color:hasSat?"#b71c1c":"#555"}}>
-                              {hasSat?"✓ Sam":"+ Sam"}
-                            </button>
+                            {isWeekLocked(sc.s)
+                              ? <span style={{fontSize:11,color:"#bbb"}}>🔒 {hasSat?satEndPostes[sc.s]||"N":"—"}</span>
+                              : <div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"center"}}>
+                                  <button onClick={()=>toggleSat(sc.s)}
+                                    style={{background:hasSat?"#fdecea":"#f5f5f5",border:`1px solid ${hasSat?"#ef9a9a":"#ccc"}`,borderRadius:6,cursor:"pointer",padding:"3px 7px",fontSize:11,color:hasSat?"#b71c1c":"#555"}}>
+                                    {hasSat?"✓ Sam":"+ Sam"}
+                                  </button>
+                                  {hasSat&&(
+                                    <select value={satEndPostes[sc.s]||"N"} onChange={e=>setSatEndForWeek(sc.s,e.target.value)}
+                                      style={{fontSize:10,padding:"2px 4px",borderRadius:4,border:"1px solid #ccc",background:"#fff",width:60}}>
+                                      <option value="M">Matin</option>
+                                      <option value="AM">AM</option>
+                                      <option value="N">Nuit</option>
+                                    </select>
+                                  )}
+                                </div>
+                            }
                           </td>
                           <td style={{padding:"8px 10px"}}>
-                            <input value={notes[sc.s]||""} onChange={e=>saveNotes({...notes,[sc.s]:e.target.value})}
-                              placeholder="Note…" style={{width:"100%",padding:"4px 6px",borderRadius:5,border:"1px solid #e0e0e0",fontSize:12,background:"transparent"}}/>
+                            {isWeekLocked(sc.s)
+                              ? <span style={{fontSize:11,color:"#bbb"}}>{notes[sc.s]||""}</span>
+                              : <input value={notes[sc.s]||""} onChange={e=>saveNotes({...notes,[sc.s]:e.target.value})}
+                                  placeholder="Note…" style={{width:"100%",padding:"4px 6px",borderRadius:5,border:"1px solid #e0e0e0",fontSize:12,background:"transparent"}}/>
+                            }
                           </td>
                         </tr>
                       );
@@ -890,12 +1043,16 @@ export default function App(){
                       <div style={{background:hasAlert?"#c62828":isCurrent?"#2d4828":BRAND,color:"#fff",padding:"10px 14px"}}>
                         <div style={{fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:6}}>
                           S{sc.s}
+                          {isWeekLocked(sc.s)&&<span style={{fontSize:10,background:"rgba(255,255,255,.2)",borderRadius:3,padding:"1px 5px"}}>🔒</span>}
                           {isCurrent&&<span style={{fontSize:10,background:"rgba(255,255,255,.25)",borderRadius:3,padding:"1px 4px"}}>● Now</span>}
                           {sc.isOverridden&&<span style={{fontSize:10,background:"rgba(255,165,0,.35)",borderRadius:3,padding:"1px 4px"}}>✏</span>}
                         </div>
-                        <div style={{fontSize:11,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}{hasSat?" · Sam ⚠":""}</div>
-                        <input value={notes[sc.s]||""} onChange={e=>saveNotes({...notes,[sc.s]:e.target.value})}
-                          placeholder="Note…" style={{marginTop:5,width:"100%",padding:"3px 6px",borderRadius:4,border:"1px solid rgba(255,255,255,.3)",fontSize:11,background:"rgba(255,255,255,.1)",color:"#fff"}}/>
+                        <div style={{fontSize:11,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}{hasSat?` · Sam ↳ ${satEndPostes[sc.s]==="M"?"Matin":satEndPostes[sc.s]==="AM"?"AM":"Nuit"}`:""}</div>
+                        {isWeekLocked(sc.s)
+                          ? <div style={{marginTop:5,fontSize:11,opacity:.7}}>{notes[sc.s]||""}</div>
+                          : <input value={notes[sc.s]||""} onChange={e=>saveNotes({...notes,[sc.s]:e.target.value})}
+                              placeholder="Note…" style={{marginTop:5,width:"100%",padding:"3px 6px",borderRadius:4,border:"1px solid rgba(255,255,255,.3)",fontSize:11,background:"rgba(255,255,255,.1)",color:"#fff"}}/>
+                        }
                       </div>
                       {SHIFT_META.map(sh=>{
                         const ops_in_shift=sc[sh.key]||[];
@@ -914,6 +1071,173 @@ export default function App(){
                           </div>
                         );
                       })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* VUE JOURS */}
+            {view==="jours"&&(
+              <div style={{overflowX:"auto"}}>
+                {schedules.map(sc=>{
+                  const hasSat=satWeeks.includes(sc.s);
+                  const m=getMondayOfWeek(sc.s,year);
+                  const numDays=hasSat?6:5;
+                  const weekSatEnd=satEndPostes[sc.s]||"N"; // par défaut Nuit si non défini
+                  const satEndIdx={M:0,AM:1,N:2}[weekSatEnd];
+                  const shiftIdx={matin:0,am:1,nuit:2};
+                  const hasAlert=sc.alerts.some(a=>!a.startsWith("ℹ"));
+                  const isCurrent=sc.s===currentWeek;
+                  const locked=isWeekLocked(sc.s);
+
+                  // Jours fériés français fixes + Ascension/Pentecôte approx
+                  const feriesDates=getFeries(year);
+
+                  // Construction des jours
+                  const days=Array.from({length:numDays},(_,d)=>{
+                    const date=new Date(m); date.setDate(m.getDate()+d);
+                    const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
+                    const isFerie=feriesDates.includes(dateStr);
+                    const isSat=d===5;
+                    return{d,date,dateStr,isFerie,isSat};
+                  });
+
+                  // Opérateurs groupés par poste
+                  const groups=[
+                    {key:"matin",label:"🌅 Matin 5h50–14h", bg:"#f0faf1",tc:"#1B5E20"},
+                    {key:"am",   label:"🌆 AM 13h50–22h",   bg:"#fffde7",tc:"#F57F17"},
+                    {key:"nuit", label:"🌙 Nuit 21h50–6h",  bg:"#e3f2fd",tc:"#0D47A1"},
+                  ];
+
+                  // Volants actifs
+                  const volantsList=operators.filter(o=>o.active&&o.isVolant);
+
+                  return(
+                    <div key={sc.s} style={{background:"#fff",borderRadius:10,border:`1px solid ${hasAlert?"#ef9a9a":isCurrent?BRAND:"#e0e0e0"}`,marginBottom:16,overflow:"hidden"}}>
+                      {/* Header semaine */}
+                      <div style={{background:hasAlert?"#c62828":isCurrent?"#2d4828":BRAND,color:"#fff",padding:"8px 14px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:700,fontSize:14}}>S{sc.s}</span>
+                        {locked&&<span style={{fontSize:10,background:"rgba(255,255,255,.2)",borderRadius:3,padding:"1px 5px"}}>🔒</span>}
+                        {isCurrent&&<span style={{fontSize:10,background:"rgba(255,255,255,.25)",borderRadius:3,padding:"1px 5px"}}>● Now</span>}
+                        {sc.isOverridden&&<span style={{fontSize:10,background:"rgba(255,165,0,.35)",borderRadius:3,padding:"1px 5px"}}>✏</span>}
+                        <span style={{fontSize:12,opacity:.8}}>{fmtDate(m)} – {fmtDate(new Date(m.getTime()+(numDays-1)*86400000))}</span>
+                        {/* Bouton Sam + sélecteur dernier poste par semaine */}
+                        {!locked&&(
+                          <div style={{display:"flex",alignItems:"center",gap:5,marginLeft:"auto"}}>
+                            <button onClick={()=>toggleSat(sc.s)}
+                              style={{fontSize:10,padding:"2px 7px",borderRadius:4,border:"1px solid rgba(255,255,255,.4)",background:hasSat?"rgba(255,255,255,.25)":"transparent",color:"#fff",cursor:"pointer"}}>
+                              {hasSat?"✓ Sam":"+ Sam"}
+                            </button>
+                            {hasSat&&(
+                              <select value={weekSatEnd} onChange={e=>setSatEndForWeek(sc.s,e.target.value)}
+                                style={{fontSize:10,padding:"2px 5px",borderRadius:4,border:"1px solid rgba(255,255,255,.3)",background:"rgba(255,255,255,.1)",color:"#fff",cursor:"pointer"}}>
+                                <option value="M">↳ Matin</option>
+                                <option value="AM">↳ AM</option>
+                                <option value="N">↳ Nuit</option>
+                              </select>
+                            )}
+                          </div>
+                        )}
+                        {locked&&hasSat&&<span style={{fontSize:11,opacity:.7,marginLeft:"auto"}}>Sam. ↳ {weekSatEnd==="M"?"Matin":weekSatEnd==="AM"?"AM":"Nuit"}</span>}
+                        {notes[sc.s]&&<span style={{fontSize:11,opacity:.8}}>{notes[sc.s]}</span>}
+                      </div>
+
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                        <thead>
+                          <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
+                            <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:160}}>Opérateur</th>
+                            {days.map(({d,dateStr,isFerie,isSat})=>(
+                              <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
+                                color:isFerie?"#c62828":isSat?"#e65100":"#666",
+                                background:isFerie?"#fff5f5":isSat?"#fff8f0":"transparent",
+                                minWidth:80,whiteSpace:"nowrap"}}>
+                                {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
+                                <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>{dateStr}{isFerie?" 🔴":""}</span>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {groups.map(({key,label,bg,tc})=>{
+                            const opsInShift=sc[key]||[];
+                            if(!opsInShift.length) return null;
+                            return(
+                              <>
+                                <tr key={`hdr-${key}`}>
+                                  <td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc,letterSpacing:.3}}>{label}</td>
+                                </tr>
+                                {opsInShift.map(short=>{
+                                  const op=operators.find(o=>o.short===short);
+                                  const lv=LEVEL_BADGE[op?.level||"N1"];
+                                  return(
+                                    <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
+                                      <td style={{padding:"5px 10px",whiteSpace:"nowrap"}}>
+                                        <span style={{fontWeight:500}}>{showFullNames?(op?.full||short):short}</span>
+                                        <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op?.level||"N1"}</span>
+                                      </td>
+                                      {days.map(({d,isFerie,isSat})=>{
+                                        // Samedi : vérifier si ce poste est autorisé
+                                        const isOff=isSat&&shiftIdx[key]>satEndIdx;
+                                        const chipBg=isOff?"#f5f5f5":isFerie?"#ffebee":bg;
+                                        const chipTc=isOff?"#bbb":isFerie?"#c62828":tc;
+                                        const label=isOff?"—":isFerie?`${key==="matin"?"M":key==="am"?"AM":"N"} 🔴`:key==="matin"?"M":key==="am"?"AM":"N";
+                                        return(
+                                          <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":isFerie?"#fff8f8":"transparent"}}>
+                                            <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
+                                              {label}
+                                            </span>
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
+                                  );
+                                })}
+                              </>
+                            );
+                          })}
+
+                          {/* Volants */}
+                          {volantsList.length>0&&(
+                            <>
+                              <tr>
+                                <td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0",letterSpacing:.3}}>☀️ Journée (volants)</td>
+                              </tr>
+                              {volantsList.map(op=>{
+                                const lv=LEVEL_BADGE[op.level||"N1"];
+                                // Vérifier si le volant est dans le planning cette semaine
+                                const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
+                                return(
+                                  <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
+                                    <td style={{padding:"5px 10px",whiteSpace:"nowrap"}}>
+                                      <span style={{fontWeight:500}}>{showFullNames?op.full:op.short}</span>
+                                      <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op.level}</span>
+                                      {inPlanning&&<span style={{background:"#e8f5e9",color:"#2e7d32",borderRadius:3,padding:"1px 4px",fontSize:9,marginLeft:3}}>planning</span>}
+                                    </td>
+                                    {days.map(({d,isFerie,isSat})=>{
+                                      // Si le volant est dans le planning, son poste est déjà affiché dans son groupe
+                                      // Sinon : Journée tous les jours (+ samedi si activé, toujours)
+                                      const chipBg=isFerie?"#ffebee":"#EDE7F6";
+                                      const chipTc=isFerie?"#c62828":"#4527A0";
+                                      const label=isFerie?"J 🔴":"J";
+                                      if(inPlanning){
+                                        return <td key={d} style={{padding:"4px 6px",textAlign:"center"}}><span style={{color:"#bbb",fontSize:11}}>—</span></td>;
+                                      }
+                                      return(
+                                        <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":isFerie?"#fff8f8":"transparent"}}>
+                                          <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
+                                            {label}
+                                          </span>
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              })}
+                            </>
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   );
                 })}
