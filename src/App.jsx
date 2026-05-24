@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // Détection mode lecture seule (lien WhatsApp : ?view=planning)
 const IS_PUBLIC = new URLSearchParams(window.location.search).get("view") === "planning";
@@ -388,45 +388,49 @@ function PublicView() {
                     ].map(({key,label,bg,tc})=>{
                       const opsIn=sc[key]||[];
                       if(!opsIn.length)return null;
-                      return(<>
-                        <tr key={`h-${key}`}><td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc}}>{label}</td></tr>
-                        {opsIn.map(short=>{
-                          const op=(operators||[]).find(o=>o.short===short);
-                          return(
-                            <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
-                              <td style={{padding:"5px 10px",fontWeight:500}}>{op?.full||short}</td>
-                              {days.map(({d,isFerie,isSat})=>{
-                                const isOff=isSat&&shiftIdx[key]>satEndIdx;
-                                return(
-                                  <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
-                                    <span style={{background:isOff?"#f5f5f5":bg,color:isOff?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                      {isOff?"—":key==="matin"?"M":key==="am"?"AM":"N"}{!isOff&&isFerie&&<span style={{fontSize:9,color:"#888",display:"block"}}>Férié</span>}
-                                    </span>
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          );
-                        })}
-                      </>);
+                      return(
+                        <React.Fragment key={key}>
+                          <tr><td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc}}>{label}</td></tr>
+                          {opsIn.map(short=>{
+                            const op=(operators||[]).find(o=>o.short===short);
+                            return(
+                              <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
+                                <td style={{padding:"5px 10px",fontWeight:500}}>{op?.full||short}</td>
+                                {days.map(({d,isFerie,isSat})=>{
+                                  const isOff=isSat&&shiftIdx[key]>satEndIdx;
+                                  return(
+                                    <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isSat?"#fffdf5":"transparent"}}>
+                                      <span style={{background:isOff?"#f5f5f5":bg,color:isOff?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                        {isOff?"—":key==="matin"?"M":key==="am"?"AM":"N"}
+                                      </span>
+                                      {!isOff&&isFerie&&<span style={{fontSize:9,color:"#888",display:"block",marginTop:1}}>Férié</span>}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </React.Fragment>
+                      );
                     })}
                     {/* Volants en journée */}
                     {(operators||[]).filter(o=>o.isVolant&&o.active).map(op=>{
                       const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
                       if(inPlanning)return null;
-                      return(<>
-                        <tr key={`hv`}><td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0"}}>☀️ Journée</td></tr>
-                        <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
-                          <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
-                          {days.map(({d,isFerie})=>(
-                            <td key={d} style={{padding:"4px 6px",textAlign:"center",background:transparent}}>
-                              <span style={{background:"#EDE7F6",color:"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                {isFerie?"J (Férié)":"J"}
-                              </span>
-                            </td>
-                          ))}
-                        </tr>
-                      </>);
+                      return(
+                        <React.Fragment key={op.short}>
+                          <tr><td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0"}}>☀️ Journée</td></tr>
+                          <tr style={{borderBottom:"0.5px solid #f5f5f5"}}>
+                            <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
+                            {days.map(({d,isFerie})=>(
+                              <td key={d} style={{padding:"4px 6px",textAlign:"center"}}>
+                                <span style={{background:"#EDE7F6",color:"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>J</span>
+                                {isFerie&&<span style={{display:"block",fontSize:9,color:"#888",marginTop:1}}>Férié</span>}
+                              </td>
+                            ))}
+                          </tr>
+                        </React.Fragment>
+                      );
                     })}
                   </tbody>
                 </table>
@@ -1202,7 +1206,7 @@ export default function App(){
                           {volantsList.length>0&&(
                             <>
                               <tr>
-                                <td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0",letterSpacing:.3}}>☀️ Journée (volants)</td>
+                                <td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0",letterSpacing:.3}}>☀️ Journée</td>
                               </tr>
                               {volantsList.map(op=>{
                                 const lv=LEVEL_BADGE[op.level||"N1"];
