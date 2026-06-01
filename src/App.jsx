@@ -1,7 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 
-// Détection mode lecture seule (lien WhatsApp : ?view=planning)
-const IS_PUBLIC = new URLSearchParams(window.location.search).get("view") === "planning";
+// ── TOKENS D'ACCÈS ───────────────────────────────────────────────────────────
+const ADMIN_TOKEN  = "neolitik-admin-2026";   // URL admin  : ?admin=neolitik-admin-2026
+const PUBLIC_TOKEN = "equipe-neolitik";        // URL public : ?view=planning&token=equipe-neolitik
+
+const params = new URLSearchParams(window.location.search);
+const IS_PUBLIC = params.get("view") === "planning" && params.get("token") === PUBLIC_TOKEN;
+const IS_ADMIN  = params.get("admin") === ADMIN_TOKEN;
+// Ni token admin ni vue publique valide → page de garde
+const IS_LOCKED = !IS_PUBLIC && !IS_ADMIN && window.location.search !== ""
+  || (!IS_PUBLIC && !IS_ADMIN && !params.has("admin") && !params.has("view"));
+
 
 // ── SUPABASE ──────────────────────────────────────────────────────────────────
 const SB_URL = "https://kgnpfwfuqwltxyrqfejk.supabase.co";
@@ -452,8 +461,20 @@ function PublicView() {
 
 // ── APP PRINCIPALE ────────────────────────────────────────────────────────────
 export default function App(){
-  // Mode lecture seule : afficher directement la vue publique
+  // Mode lecture seule
   if(IS_PUBLIC) return <PublicView/>;
+
+  // Accès sans token admin → page de garde
+  if(!IS_ADMIN){
+    return(
+      <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f8fa"}}>
+        <div style={{textAlign:"center",color:"#555"}}>
+          <div style={{fontWeight:700,fontSize:18,color:"#1a1a2e",marginBottom:8}}>NEOLITIK</div>
+          <div style={{fontSize:13}}>Accès non autorisé.</div>
+        </div>
+      </div>
+    );
+  }
 
   const [tab,setTab]             = useState("planning");
   const [operators,setOperators] = useState(DEFAULT_OPERATORS);
@@ -563,9 +584,30 @@ export default function App(){
   // des overrides comme contexte (prevNuit, compteurs équité)
   const recalculate = ()=>{
     pushHistory("Recalcul planning",{overrides});
-    // On force un recalcul en retriggering le useEffect sans toucher aux overrides
-    // Il suffit de re-sauvegarder les overrides tels quels pour déclencher le recalcul
-    recompute(operators, absences, leaves, overrides, weeks);
+    const activeShorts = operators.filter(o=>o.active).map(o=>o.short);
+    // Purger les overrides des semaines futures : retirer les opérateurs inactifs
+    // Les semaines passées (verrouillées) sont conservées intactes
+    const cleanedOverrides = {};
+    Object.entries(overrides).forEach(([wk, slots])=>{
+      const w = parseInt(wk);
+      if(isWeekLocked(w)){
+        // Semaine passée : on conserve tel quel
+        cleanedOverrides[wk] = slots;
+      } else {
+        // Semaine future : retirer les inactifs de chaque poste
+        const cleaned = {
+          matin: (slots.matin||[]).filter(s=>activeShorts.includes(s)),
+          am:    (slots.am||[]).filter(s=>activeShorts.includes(s)),
+          nuit:  (slots.nuit||[]).filter(s=>activeShorts.includes(s)),
+        };
+        // Ne conserver l'override que s'il reste du contenu
+        if(cleaned.matin.length||cleaned.am.length||cleaned.nuit.length){
+          cleanedOverrides[wk] = cleaned;
+        }
+      }
+    });
+    saveOverrides(cleanedOverrides);
+    recompute(operators, absences, leaves, cleanedOverrides, weeks);
     flash("Planning recalculé ✓");
   };
 
@@ -814,7 +856,7 @@ export default function App(){
             <div style={{background:"#f0f4ff",border:"1px solid #c5cae9",borderRadius:7,padding:"10px 12px",marginBottom:20,fontSize:12,color:"#555"}}>
               🔗 Lien à partager :<br/>
               <span style={{fontFamily:"monospace",fontSize:11,wordBreak:"break-all",color:BRAND}}>
-                {window.location.origin}/?view=planning
+                {window.location.origin}/?view=planning&token={PUBLIC_TOKEN}
               </span>
             </div>
             <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
