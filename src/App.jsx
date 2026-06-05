@@ -762,12 +762,12 @@ export default function App(){
   const addOperator = ()=>{
     if(!newOp.prenom.trim()||!newOp.nom.trim())return;
     const short=newOp.nom.toUpperCase().trim();
-    // Les N4 ajoutés manuellement sont des volants : exclus du calcul auto, en réserve uniquement
-    const isVolant = newOp.level==="N4";
-    const op={id:`op_${Date.now()}`,full:`${newOp.prenom.trim()} ${short}`,short,level:newOp.level,active:true,isVolant};
+    // Tous les nouveaux opérateurs sont intégrés à l'algo automatiquement (isVolant:false).
+    // L'utilisateur peut passer un op en volant manuellement depuis l'onglet Équipe.
+    const op={id:`op_${Date.now()}`,full:`${newOp.prenom.trim()} ${short}`,short,level:newOp.level,active:true,isVolant:false};
     saveOperators([...operators,op]);
     setNewOp({prenom:"",nom:"",level:"N1"}); setShowAddOp(false);
-    flash(`${op.full} ajouté${isVolant?" (volant N4 — glissement manuel)":""}`);
+    flash(`${op.full} ajouté — intégré au planning automatique`);
   };
   const toggleActive  = id=>saveOperators(operators.map(o=>o.id===id?{...o,active:!o.active}:o));
   const toggleVolant  = id=>saveOperators(operators.map(o=>o.id===id?{...o,isVolant:!o.isVolant}:o));
@@ -1752,7 +1752,7 @@ export default function App(){
               <button onClick={()=>setShowAddOp(!showAddOp)} style={{padding:"6px 14px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>+ Ajouter</button>
             </div>
             <div style={{background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:7,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#2e7d32"}}>
-              ℹ️ L'algorithme intègre automatiquement tout opérateur actif. Les N4 ajoutés manuellement participent au cycle de nuit dès leur activation.
+              ℹ️ Tout opérateur actif est intégré automatiquement à l'algorithme. Avec 4 N4 actifs, l'algo tourne sur les 4 et laisse l'un d'eux en repos chaque semaine — il prend le relais dès qu'un autre est absent. Utilisez "Passer volant" pour exclure un opérateur du planning auto (glissement manuel uniquement).
             </div>
             {activeOps.length<8&&(
               <div style={{background:"#fff8e1",border:"1px solid #ffe082",borderRadius:7,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#f57f17"}}>
