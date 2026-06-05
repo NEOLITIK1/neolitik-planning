@@ -185,17 +185,18 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     const restN4   = activeN4.filter(o=>!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
     const restNon4 = activeNon4.filter(o=>!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
 
-    // Tri équité : moins de ce poste d'abord + pénalité 0.5 si poste identique semaine précédente
-    // (contrainte souple anti-consécutif Matin et AM)
+    // Tri : 1) anti-consécutif (priorité absolue), 2) équité, 3) départage nuits
     const sortMat = (a,b)=>{
-      const as=matCount[a.short]+(prevMatin.includes(a.short)?0.5:0);
-      const bs=matCount[b.short]+(prevMatin.includes(b.short)?0.5:0);
-      return as!==bs ? as-bs : nightCount[b.short]-nightCount[a.short];
+      const ac=prevMatin.includes(a.short)?1:0, bc=prevMatin.includes(b.short)?1:0;
+      if(ac!==bc) return ac-bc; // jamais deux Matins de suite si on peut l'éviter
+      if(matCount[a.short]!==matCount[b.short]) return matCount[a.short]-matCount[b.short];
+      return nightCount[b.short]-nightCount[a.short];
     };
     const sortAm = (a,b)=>{
-      const as=amCount[a.short]+(prevAm.includes(a.short)?0.5:0);
-      const bs=amCount[b.short]+(prevAm.includes(b.short)?0.5:0);
-      return as!==bs ? as-bs : nightCount[b.short]-nightCount[a.short];
+      const ac=prevAm.includes(a.short)?1:0, bc=prevAm.includes(b.short)?1:0;
+      if(ac!==bc) return ac-bc; // jamais deux AM de suite si on peut l'éviter
+      if(amCount[a.short]!==amCount[b.short]) return amCount[a.short]-amCount[b.short];
+      return nightCount[b.short]-nightCount[a.short];
     };
 
     // Priorité AM : on remplit AM en premier pour garantir le minimum de 2
