@@ -89,7 +89,7 @@ function getCurrentWeek(year){
 
 // ── ALGORITHME DYNAMIQUE ──────────────────────────────────────────────────────
 // Contraintes absolues : 1 N4/poste, 3 en nuit, jamais 2 nuits consécutives
-// Contraintes souples : éviter 2 Matin ou 2 AM consécutifs (pénalité 0.5 sur le score d'équité)
+// Contraintes souples : éviter 2 Matin ou 2 AM consécutifs (priorité absolue + swap AM/Matin)
 // Rotation Nuit → AM → Matin
 function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overrides) {
   const active    = operators.filter(o=>o.active);
@@ -240,6 +240,13 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     absWeekPartial.forEach(e=>{
       const[short,,day]=e.split("|");
       alerts.push(`ℹ S${s} : ${short} absent le ${day}`);
+    });
+
+    // Congés partiels : informatif (non traités par l'algo mais signalés)
+    (leaves[s]||[]).filter(e=>e.includes(":")).forEach(e=>{
+      const[short,range]=e.split(":");
+      const[sd,ed]=range.split("-").map(Number);
+      alerts.push(`ℹ S${s} : ${short} en congé ${DAYS_FR[sd]}–${DAYS_FR[ed]}`);
     });
 
     schedules.push({s, matin, am, nuit, alerts, isOverridden:false});
@@ -675,7 +682,16 @@ export default function App(){
     for(let w=leaveFrom;w<=leaveTo;w++){
       const sd=w===leaveFrom?leaveFromDay:1, ed=w===leaveTo?leaveToDay:5;
       const entry=(sd===1&&ed>=5)?leaveOp:`${leaveOp}:${sd}-${ed}`;
-      next[w]=[...(next[w]||[]).filter(e=>e!==leaveOp&&!e.startsWith(`${leaveOp}:`)),entry];
+      // Si c'est un congé semaine complète, remplacer tout
+      // Si c'est un congé partiel, ne remplacer qu'un congé complet existant
+      // (les partiels coexistent pour couvrir des jours différents)
+      if(sd===1&&ed>=5){
+        // Semaine complète : supprime tout (complet + partiels)
+        next[w]=[...(next[w]||[]).filter(e=>e!==leaveOp&&!e.startsWith(`${leaveOp}:`)),entry];
+      } else {
+        // Partiel : supprime un congé complet s'il existe, mais garde les autres partiels
+        next[w]=[...(next[w]||[]).filter(e=>e!==leaveOp),entry];
+      }
     }
     saveLeaves(next);
     // ── Alerte préventive : vérifier disponibilité N4 semaine par semaine
@@ -783,7 +799,27 @@ export default function App(){
   };
   const toggleActive  = id=>saveOperators(operators.map(o=>o.id===id?{...o,active:!o.active}:o));
   const toggleVolant  = id=>saveOperators(operators.map(o=>o.id===id?{...o,isVolant:!o.isVolant}:o));
-  const deleteOp = id=>{if(window.confirm("Supprimer définitivement ?"))saveOperators(operators.filter(o=>o.id!==id));};
+  const deleteOp = id=>{
+    if(!window.confirm("Supprimer définitivement ?")) return;
+    const op = operators.find(o=>o.id===id);
+    const next = operators.filter(o=>o.id!==id);
+    saveOperators(next);
+    // Nettoyer les overrides : retirer l'opérateur supprimé de toutes les semaines
+    if(op && Object.keys(overrides).length>0){
+      const cleaned = {};
+      let changed = false;
+      Object.entries(overrides).forEach(([wk, slots])=>{
+        const cl = {
+          matin: (slots.matin||[]).filter(s=>s!==op.short),
+          am:    (slots.am||[]).filter(s=>s!==op.short),
+          nuit:  (slots.nuit||[]).filter(s=>s!==op.short),
+        };
+        if(cl.matin.length!==(slots.matin||[]).length || cl.am.length!==(slots.am||[]).length || cl.nuit.length!==(slots.nuit||[]).length) changed=true;
+        if(cl.matin.length||cl.am.length||cl.nuit.length) cleaned[wk]=cl;
+      });
+      if(changed) saveOverrides(cleaned);
+    }
+  };
 
   // Semaine verrouillée : strictement inférieure à la semaine courante
   const isWeekLocked = w => w < currentWeek;
