@@ -199,10 +199,24 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
       return nightCount[b.short]-nightCount[a.short];
     };
 
-    // Priorité AM : on remplit AM en premier pour garantir le minimum de 2
-    // N4 pour AM : le moins chargé en AM parmi les restants
+    // N4 pour AM (premier tri par équité + anti-consécutif)
     const restN4ForAm = [...restN4].sort(sortAm);
-    const n4Am = restN4ForAm[0];
+    let n4Am = restN4ForAm[0];
+
+    // N4 pour Matin (parmi les restants après AM)
+    let n4Matin = restN4.filter(o=>o.short!==n4Am?.short).sort(sortMat)[0];
+
+    // ── Optimisation d'assignation AM/Matin ──────────────────────────────────
+    // Problème : avec 3 N4, la sélection séquentielle (AM d'abord) peut laisser
+    // systématiquement le même N4 en Matin par élimination.
+    // Solution : après sélection initiale, tester si échanger AM/Matin réduit
+    // le nombre d'enchaînements consécutifs (score plus bas = meilleur).
+    if(n4Am && n4Matin) {
+      const scoreCur = (prevAm.includes(n4Am.short)?10:0) + (prevMatin.includes(n4Matin.short)?10:0);
+      const scoreSwp = (prevAm.includes(n4Matin.short)?10:0) + (prevMatin.includes(n4Am.short)?10:0);
+      if(scoreSwp < scoreCur){ const t=n4Am; n4Am=n4Matin; n4Matin=t; }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Non-N4 pour AM : distribués équitablement entre AM et Matin
     // Avec 5 non-N4 restants=3 → AM:1 Matin:2 ; avec 6 non-N4 restants=4 → AM:2 Matin:2
@@ -211,9 +225,6 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     const non4AmList = restNon4ForAm.slice(0, amNon4Count);
 
     const am = [n4Am?.short, ...non4AmList.map(o=>o.short)].filter(Boolean);
-
-    // Matin : N4 restant (pas celui pris pour AM) + tous les non-N4 restants
-    const n4Matin = restN4.filter(o=>o.short!==n4Am?.short).sort(sortMat)[0];
     const non4Matin = restNon4
       .filter(o=>!non4AmList.some(a=>a.short===o.short))
       .sort(sortMat);
