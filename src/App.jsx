@@ -628,22 +628,25 @@ export default function App(){
     recompute(operators,absences,leaves,overrides,weeks);
   },[loaded,startWeek,numWeeks,operators,absences,leaves,year]);
 
-  // ── RECALCULER : efface les overrides futurs, repart de l'algo pur
-  // Les semaines passées (verrouillées) sont conservées intactes.
+  // ── RECALCULER : efface les overrides à partir de startWeek, repart de l'algo.
+  // Les overrides AVANT startWeek sont conservés comme base de contexte
+  // (prevNuit, prevMatin, prevAm, compteurs d'équité).
+  // Cas d'usage : modifier manuellement S23, sélectionner S24 comme départ,
+  // cliquer Recalculer → l'algo se base sur la config manuelle de S23.
   const recalculate = ()=>{
-    const futureOvCount = Object.keys(overrides).filter(wk=>!isWeekLocked(parseInt(wk))).length;
-    if(futureOvCount>0 && !window.confirm(
-      `⚠ Recalculer va supprimer ${futureOvCount} ajustement(s) manuel(s) sur des semaines futures.\n\nL'algorithme repartira de zéro pour toutes les semaines à venir.\n\nContinuer ?`
+    const affectedOvCount = Object.keys(overrides).filter(wk=>parseInt(wk)>=startWeek).length;
+    if(affectedOvCount>0 && !window.confirm(
+      `⚠ Recalculer va supprimer ${affectedOvCount} ajustement(s) manuel(s) à partir de S${startWeek}.\n\nLes overrides avant S${startWeek} sont conservés comme base.\nL'algorithme recalcule de S${startWeek} à S${startWeek+numWeeks-1}.\n\nContinuer ?`
     )) return;
     pushHistory("Recalcul planning",{overrides});
-    // Ne garder que les overrides des semaines déjà écoulées
+    // Garder les overrides AVANT startWeek (base de contexte)
     const cleanedOverrides = {};
     Object.entries(overrides).forEach(([wk, slots])=>{
-      if(isWeekLocked(parseInt(wk))) cleanedOverrides[wk] = slots;
+      if(parseInt(wk) < startWeek) cleanedOverrides[wk] = slots;
     });
     saveOverrides(cleanedOverrides);
     recompute(operators, absences, leaves, cleanedOverrides, weeks);
-    flash("Planning recalculé ✓");
+    flash(`Planning recalculé à partir de S${startWeek} ✓`);
   };
 
   const allAlerts = schedules.flatMap(s=>s.alerts).filter(a=>!a.startsWith("ℹ"));
