@@ -1,15 +1,21 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // ── TOKENS D'ACCÈS ───────────────────────────────────────────────────────────
-const ADMIN_TOKEN  = "neolitik-admin-2026";   // URL admin  : ?admin=neolitik-admin-2026
+// Le token admin n'apparaît plus en clair dans le code : seul son empreinte
+// SHA-256 est embarquée. L'URL reste ?admin=neolitik-admin-2026 — le token
+// saisi est haché côté navigateur et comparé à l'empreinte.
+// (Limite connue : la clé anon Supabase reste exposée ; une vraie protection
+// des données nécessiterait des règles RLS côté Supabase.)
+const ADMIN_HASH   = "015281d6d5f769ed0f86baaa647ba18f5998a9ccca059f8e925fc011a99318b6";
 const PUBLIC_TOKEN = "equipe-neolitik";        // URL public : ?view=planning&token=equipe-neolitik
 
 const params = new URLSearchParams(window.location.search);
 const IS_PUBLIC = params.get("view") === "planning" && params.get("token") === PUBLIC_TOKEN;
-const IS_ADMIN  = params.get("admin") === ADMIN_TOKEN;
-// Ni token admin ni vue publique valide → page de garde
-const IS_LOCKED = !IS_PUBLIC && !IS_ADMIN && window.location.search !== ""
-  || (!IS_PUBLIC && !IS_ADMIN && !params.has("admin") && !params.has("view"));
+
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
+}
 
 
 // ── SUPABASE ──────────────────────────────────────────────────────────────────
@@ -91,7 +97,12 @@ function getCurrentWeek(year){
 // Contraintes absolues : 1 N4/poste, 3 en nuit, jamais 2 nuits consécutives
 // Contraintes souples : éviter 2 Matin ou 2 AM consécutifs (priorité absolue + swap AM/Matin)
 // Rotation Nuit → AM → Matin
-function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overrides) {
+// archive : semaines écoulées figées (réalité travaillée) — priorité absolue,
+// jamais recalculées même si l'effectif change ensuite (fiabilité paie/suivi).
+// fromWeek/toWeek par opérateur : fenêtre de présence (arrivées/départs en cours d'année).
+// L'équité est proportionnelle aux semaines de présence : un nouvel arrivant
+// n'est pas surchargé pour "rattraper" les compteurs des anciens.
+function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overrides, archive={}) {
   const active    = operators.filter(o=>o.active);
   // Les volants (N4 ajoutés manuellement) sont exclus du calcul automatique
   // Ils apparaissent uniquement via glissement manuel (réserve)
@@ -101,6 +112,9 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
   const nightCount= Object.fromEntries(active.map(o=>[o.short,0]));
   const matCount  = Object.fromEntries(active.map(o=>[o.short,0]));
   const amCount   = Object.fromEntries(active.map(o=>[o.short,0]));
+  const presentCount = Object.fromEntries(active.map(o=>[o.short,0]));
+
+  const inWindow = (o,s)=>(!o.fromWeek||s>=o.fromWeek)&&(!o.toWeek||s<=o.toWeek);
 
   let prevNuit  = [];
   let prevMatin = [];
@@ -109,6 +123,22 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
 
   for(let i=0;i<numWeeks;i++){
     const s = startWeek+i;
+
+    active.forEach(o=>{ if(inWindow(o,s)) presentCount[o.short]++; });
+
+    // Semaine archivée (écoulée) : la réalité travaillée prime sur tout
+    if(archive[s]){
+      const ar = archive[s];
+      const arMatin=ar.matin||[], arAm=ar.am||[], arNuit=ar.nuit||[];
+      schedules.push({s, matin:arMatin, am:arAm, nuit:arNuit, alerts:[], isOverridden:false, isArchived:true});
+      arMatin.forEach(o=>{if(matCount[o]!==undefined)matCount[o]++;});
+      arAm.forEach(o=>{if(amCount[o]!==undefined)amCount[o]++;});
+      arNuit.forEach(o=>{if(nightCount[o]!==undefined)nightCount[o]++;});
+      prevNuit  = arNuit;
+      prevMatin = arMatin;
+      prevAm    = arAm;
+      continue;
+    }
 
     // Override manuel pour cette semaine ?
     if(overrides[s]){
@@ -153,14 +183,17 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     const alerts = [];
 
     // ── NUIT ──
-    // Disponibles : pas en nuit S-1, pas absents
-    const availN4nuit  = activeN4.filter(o=>!prevNuit.includes(o.short)&&!absWeekFull.includes(o.short));
-    const availNon4nuit= activeNon4.filter(o=>!prevNuit.includes(o.short)&&!absWeekFull.includes(o.short));
+    // Disponibles : présents cette semaine, pas en nuit S-1, pas absents
+    const availN4nuit  = activeN4.filter(o=>inWindow(o,s)&&!prevNuit.includes(o.short)&&!absWeekFull.includes(o.short));
+    const availNon4nuit= activeNon4.filter(o=>inWindow(o,s)&&!prevNuit.includes(o.short)&&!absWeekFull.includes(o.short));
 
-    // Tri : moins de nuits d'abord, départage : plus d'AM (rééquilibrage)
-    const sortNuit = (a,b)=> nightCount[a.short]!==nightCount[b.short]
-      ? nightCount[a.short]-nightCount[b.short]
-      : amCount[b.short]-amCount[a.short];
+    // Équité proportionnelle : taux = compteur / semaines de présence
+    const rate = (cnt,o)=> cnt[o.short]/Math.max(presentCount[o.short],1);
+
+    // Tri : taux de nuits le plus bas d'abord, départage : plus d'AM (rééquilibrage)
+    const sortNuit = (a,b)=> rate(nightCount,a)!==rate(nightCount,b)
+      ? rate(nightCount,a)-rate(nightCount,b)
+      : rate(amCount,b)-rate(amCount,a);
 
     availN4nuit.sort(sortNuit);
     availNon4nuit.sort(sortNuit);
@@ -170,7 +203,7 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     // Fallback si aucun N4 dispo pour la nuit : prendre le moins chargé même s'il était en nuit
     if(!n4Nuit){
       alerts.push(`⛔ S${s} : aucun N4 disponible en nuit — contrainte non satisfaite, glissement manuel requis`);
-      const fallback = activeN4.filter(o=>!absWeekFull.includes(o.short));
+      const fallback = activeN4.filter(o=>inWindow(o,s)&&!absWeekFull.includes(o.short));
       fallback.sort(sortNuit);
       n4Nuit = fallback[0];
     }
@@ -182,21 +215,21 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     const nuit = [n4Nuit?.short,...non4Nuit.map(o=>o.short)].filter(Boolean);
 
     // ── MATIN & AM ──
-    const restN4   = activeN4.filter(o=>!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
-    const restNon4 = activeNon4.filter(o=>!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
+    const restN4   = activeN4.filter(o=>inWindow(o,s)&&!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
+    const restNon4 = activeNon4.filter(o=>inWindow(o,s)&&!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
 
-    // Tri : 1) anti-consécutif (priorité absolue), 2) équité, 3) départage nuits
+    // Tri : 1) anti-consécutif (priorité absolue), 2) équité proportionnelle, 3) départage nuits
     const sortMat = (a,b)=>{
       const ac=prevMatin.includes(a.short)?1:0, bc=prevMatin.includes(b.short)?1:0;
       if(ac!==bc) return ac-bc; // jamais deux Matins de suite si on peut l'éviter
-      if(matCount[a.short]!==matCount[b.short]) return matCount[a.short]-matCount[b.short];
-      return nightCount[b.short]-nightCount[a.short];
+      if(rate(matCount,a)!==rate(matCount,b)) return rate(matCount,a)-rate(matCount,b);
+      return rate(nightCount,b)-rate(nightCount,a);
     };
     const sortAm = (a,b)=>{
       const ac=prevAm.includes(a.short)?1:0, bc=prevAm.includes(b.short)?1:0;
       if(ac!==bc) return ac-bc; // jamais deux AM de suite si on peut l'éviter
-      if(amCount[a.short]!==amCount[b.short]) return amCount[a.short]-amCount[b.short];
-      return nightCount[b.short]-nightCount[a.short];
+      if(rate(amCount,a)!==rate(amCount,b)) return rate(amCount,a)-rate(amCount,b);
+      return rate(nightCount,b)-rate(nightCount,a);
     };
 
     // N4 pour AM (premier tri par équité + anti-consécutif)
@@ -258,7 +291,7 @@ function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overri
     prevMatin = matin;
     prevAm    = am;
   }
-  return {schedules, nightCount, matCount, amCount};
+  return {schedules, nightCount, matCount, amCount, presentCount};
 }
 
 // ── COMPOSANTS ────────────────────────────────────────────────────────────────
@@ -267,11 +300,15 @@ function LevelBadge({level}){
   return <span style={{background:s.bg,color:s.color,borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:500}}>{level}</span>;
 }
 
-function OpChip({name,operators,draggable,onDragStart,highlight}){
+function OpChip({name,operators,draggable,onDragStart,onDropChip,highlight}){
   const op=operators.find(o=>o.short===name||o.full===name);
   const s=LEVEL_BADGE[op?.level||"N1"];
+  // onDropChip : déposer un opérateur SUR un autre = échange direct de leurs postes
   return(
-    <span draggable={draggable} onDragStart={onDragStart} title={op?.full||name}
+    <span draggable={draggable} onDragStart={onDragStart}
+      onDragOver={onDropChip?e=>{e.preventDefault();e.stopPropagation();}:undefined}
+      onDrop={onDropChip?e=>{e.stopPropagation();onDropChip();}:undefined}
+      title={op?.full||name}
       style={{display:"inline-flex",alignItems:"center",gap:3,
         background:highlight?"#FFF176":s.bg, color:s.color,
         borderRadius:4,padding:"2px 7px",fontSize:12,margin:"2px",fontWeight:500,
@@ -505,13 +542,30 @@ function PublicView() {
   );
 }
 
-// ── APP PRINCIPALE ────────────────────────────────────────────────────────────
+// ── GARDE D'ACCÈS ─────────────────────────────────────────────────────────────
+// Vérifie le token admin par empreinte SHA-256 (asynchrone), puis rend AdminApp.
 export default function App(){
+  const [adminOk,setAdminOk] = useState(null); // null = vérification en cours
+  useEffect(()=>{
+    (async()=>{
+      const t = params.get("admin");
+      if(!t){ setAdminOk(false); return; }
+      try{ setAdminOk(await sha256Hex(t)===ADMIN_HASH); }
+      catch{ setAdminOk(false); } // crypto.subtle absent (http non sécurisé)
+    })();
+  },[]);
+
   // Mode lecture seule
   if(IS_PUBLIC) return <PublicView/>;
 
-  // Accès sans token admin → page de garde
-  if(!IS_ADMIN){
+  if(adminOk===null) return(
+    <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f8fa",color:"#888",fontSize:13}}>
+      Vérification de l'accès…
+    </div>
+  );
+
+  // Accès sans token admin valide → page de garde
+  if(!adminOk){
     return(
       <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f8fa"}}>
         <div style={{textAlign:"center",color:"#555"}}>
@@ -522,11 +576,17 @@ export default function App(){
     );
   }
 
+  return <AdminApp/>;
+}
+
+// ── APP PRINCIPALE (admin) ────────────────────────────────────────────────────
+function AdminApp(){
   const [tab,setTab]             = useState("planning");
   const [operators,setOperators] = useState(DEFAULT_OPERATORS);
   const [absences,setAbsences]   = useState({});
   const [leaves,setLeaves]       = useState({});
   const [overrides,setOverrides] = useState({}); // { semaine: {matin,am,nuit} }
+  const [archive,setArchive]     = useState({}); // { annee: { semaine: {matin,am,nuit} } } — semaines écoulées figées (paie/suivi)
   const [satWeeks,setSatWeeks]       = useState([]);
   const [satEndPostes,setSatEndPostes] = useState({}); // { [semaine]: "M"|"AM"|"N" }
   const [joursChomes,setJoursChomes]   = useState({}); // { "semaine-dateStr": true } jour chômé = toute l'équipe absente
@@ -548,6 +608,7 @@ export default function App(){
   const [syncMsg,setSyncMsg]     = useState("Chargement...");
   const [flashMsg,setFlashMsg]   = useState(null);
   const [schedules,setSchedules] = useState([]);
+  const [allSchedules,setAllSchedules] = useState([]); // S1 → fin de fenêtre (archivage + export paie)
   const [equity,setEquity]       = useState([]);
   const [loaded,setLoaded]       = useState(false);
   const [publishModal,setPublishModal] = useState(false);
@@ -556,6 +617,9 @@ export default function App(){
 
   const weeks = Array.from({length:numWeeks},(_,i)=>startWeek+i);
   const currentWeek = getCurrentWeek(year);
+  // Archive de l'année affichée uniquement — les semaines de 2026 ne doivent
+  // jamais s'appliquer au planning 2027 (les numéros de semaine se répètent)
+  const yearArchive = archive[year]||{};
   const flash = (msg,color="#2e7d32")=>{setFlashMsg({msg,color});setTimeout(()=>setFlashMsg(null),2500);};
   const activeOps = operators.filter(o=>o.active);
 
@@ -564,12 +628,12 @@ export default function App(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,sw,sep,jc,nt,hi,yr]=await Promise.all([
-          sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),
+        const [ops,abs,lv,ov,ar,sw,sep,jc,nt,hi,yr]=await Promise.all([
+          sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),sbGet("archive"),
           sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("notes"),sbGet("history"),sbGet("year"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
-        if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov);
+        if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov); if(ar)setArchive(ar);
         if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep); if(jc)setJoursChomes(jc);
         if(nt)setNotes(nt); if(hi)setHistory(hi);
         if(yr)setYear(Number(yr));
@@ -589,6 +653,7 @@ export default function App(){
   const saveAbsences    = useCallback(v=>{setAbsences(v);    save("absences",v);},[save]);
   const saveLeaves      = useCallback(v=>{setLeaves(v);      save("leaves",v);},[save]);
   const saveOverrides   = useCallback(v=>{setOverrides(v);   save("overrides",v);},[save]);
+  const saveArchive     = useCallback(v=>{setArchive(v);     save("archive",v);},[save]);
   const saveSatWeeks    = useCallback(v=>{setSatWeeks(v);    save("satweeks",v);},[save]);
   const saveSatEndPostes= useCallback(v=>{setSatEndPostes(v);save("satendpostes",v);},[save]);
   const saveJoursChomes = useCallback(v=>{setJoursChomes(v);save("jourschomes",v);},[save]);
@@ -605,28 +670,45 @@ export default function App(){
   // ── CALCUL PLANNING
   // Construit depuis S1 pour des compteurs d'équité précis sur l'année entière.
   // N'affiche que la fenêtre demandée (wks), mais l'équité est annuelle.
-  const recompute = (ops,abs,lv,ov,wks)=>{
+  const recompute = (ops,abs,lv,ov,arc,wks)=>{
     if(!wks.length) return;
     const displayEnd = wks[wks.length-1];
-    const {schedules:allSc,nightCount,matCount,amCount} = buildSchedules(ops,1,displayEnd,abs,lv,ov);
+    const {schedules:allSc,nightCount,matCount,amCount,presentCount} = buildSchedules(ops,1,displayEnd,abs,lv,ov,arc);
+    setAllSchedules(allSc);
     setSchedules(allSc.filter(s=>s.s>=wks[0]));
     const eq = ops.filter(o=>o.active).map(op=>({
       ...op,
       matin: matCount[op.short]||0,
       am:    amCount[op.short]||0,
       nuit:  nightCount[op.short]||0,
+      present: presentCount[op.short]||0,
       total:(matCount[op.short]||0)+(amCount[op.short]||0)+(nightCount[op.short]||0),
     }));
     setEquity(eq);
   };
 
   // Recalcul automatique uniquement sur changements structurels
-  // (opérateurs, absences, congés, période) — PAS sur les overrides
+  // (opérateurs, absences, congés, archive, période) — PAS sur les overrides
   // Les overrides sont lus par buildSchedules mais ne déclenchent pas de recalcul
   useEffect(()=>{
     if(!loaded)return;
-    recompute(operators,absences,leaves,overrides,weeks);
-  },[loaded,startWeek,numWeeks,operators,absences,leaves,year]);
+    recompute(operators,absences,leaves,overrides,yearArchive,weeks);
+  },[loaded,startWeek,numWeeks,operators,absences,leaves,archive,year]);
+
+  // ── ARCHIVAGE AUTOMATIQUE des semaines écoulées ──────────────────────────
+  // Dès qu'une semaine passe (S < semaine courante), son planning est figé tel
+  // qu'il était : les départs/arrivées d'opérateurs ou recalculs ultérieurs ne
+  // réécrivent plus le passé. C'est la référence pour la paie et le suivi.
+  useEffect(()=>{
+    if(!loaded) return;
+    if(year!==new Date().getFullYear()) return; // archive uniquement l'année en cours
+    const toAdd={};
+    allSchedules.forEach(sc=>{
+      if(sc.s<currentWeek && !yearArchive[sc.s])
+        toAdd[sc.s]={matin:sc.matin,am:sc.am,nuit:sc.nuit};
+    });
+    if(Object.keys(toAdd).length) saveArchive({...archive,[year]:{...yearArchive,...toAdd}});
+  },[loaded,allSchedules]);
 
   // ── RECALCULER : efface les overrides à partir de startWeek, repart de l'algo.
   // Les overrides AVANT startWeek sont conservés comme base de contexte
@@ -645,7 +727,7 @@ export default function App(){
       if(parseInt(wk) < startWeek) cleanedOverrides[wk] = slots;
     });
     saveOverrides(cleanedOverrides);
-    recompute(operators, absences, leaves, cleanedOverrides, weeks);
+    recompute(operators, absences, leaves, cleanedOverrides, yearArchive, weeks);
     flash(`Planning recalculé à partir de S${startWeek} ✓`);
   };
 
@@ -655,15 +737,21 @@ export default function App(){
   // ── ABSENCES
   const addAbsence = ()=>{
     if(!absOp)return;
-    if(isWeekLocked(absWeek)){flash("Semaine écoulée — modification impossible","#c62828");return;}
     pushHistory(`Absence: ${absOp} S${absWeek}`,{absences});
     const entry = absDay===0 ? absOp : `${absOp}|${absWeek}|${DAYS_FR[absDay]}`;
+    // Semaine complète : remplace tout (complet + partiels redondants).
+    // Jour précis : ne retire que le doublon exact — plusieurs jours partiels coexistent.
     const cur=(absences[absWeek]||[]).filter(e=>{
-      const s=e.includes("|")?e.split("|")[0]:e;
-      return !(s===absOp&&(absDay===0?!e.includes("|"):e.includes("|")));
+      if(absDay===0){ const sh=e.includes("|")?e.split("|")[0]:e; return sh!==absOp; }
+      return e!==entry;
     });
     saveAbsences({...absences,[absWeek]:[...cur,entry]});
-    flash(`Absence ajoutée : ${absOp} S${absWeek}`);
+    // Saisie rétroactive autorisée : le planning écoulé est archivé (inchangé),
+    // l'absence est enregistrée pour le suivi et la paie.
+    if(isWeekLocked(absWeek))
+      flash(`Absence enregistrée S${absWeek} (semaine écoulée — planning archivé inchangé)`,"#e65100");
+    else
+      flash(`Absence ajoutée : ${absOp} S${absWeek}`);
   };
   const removeAbsence = (week,entry)=>{
     const cur=(absences[week]||[]).filter(e=>e!==entry);
@@ -680,6 +768,8 @@ export default function App(){
   };
   const addLeave = ()=>{
     if(!leaveOp)return;
+    if(leaveTo<leaveFrom){flash("Semaine de fin antérieure à la semaine de début","#c62828");return;}
+    if(leaveFrom===leaveTo&&leaveToDay<leaveFromDay){flash("Jour de fin antérieur au jour de début","#c62828");return;}
     pushHistory(`Congé: ${leaveOp}`,{leaves});
     const next={...leaves};
     for(let w=leaveFrom;w<=leaveTo;w++){
@@ -748,7 +838,7 @@ export default function App(){
       }};
       setOverrides(newOvR);
       save("overrides",newOvR);
-      recompute(operators,absences,leaves,newOvR,weeks);
+      recompute(operators,absences,leaves,newOvR,yearArchive,weeks);
       flash(`${src.name} → ${targetShift} S${week}`);
       dragRef.current=null; return;
     }
@@ -766,8 +856,33 @@ export default function App(){
     }};
     setOverrides(newOvG);
     save("overrides",newOvG);
-    recompute(operators,absences,leaves,newOvG,weeks);
+    recompute(operators,absences,leaves,newOvG,yearArchive,weeks);
     flash(`${src.name} → ${targetShift} S${week}`);
+    dragRef.current=null;
+  };
+
+  // ── ÉCHANGE EN UN CLIC : déposer un opérateur SUR un autre = swap des postes
+  // Cas d'usage : arrangement ponctuel entre deux ouvriers ("je te prends ta
+  // nuit, tu prends mon matin") sans faire deux glissements.
+  const onSwap = (week,targetShift,targetName)=>{
+    const src=dragRef.current;
+    // Pas un échange (réserve, autre semaine, soi-même) → comportement glissement normal
+    if(!src||src.shift==="reserve"||src.week!==week||src.name===targetName){ onDrop(week,targetShift); return; }
+    if(src.shift===targetShift){ dragRef.current=null; return; } // même poste : rien à échanger
+    if(isWeekLocked(week)){flash("Semaine écoulée — modification impossible","#c62828");dragRef.current=null;return;}
+    const cur = schedules.find(s=>s.s===week);
+    if(!cur){ dragRef.current=null; return; }
+    const existing = overrides[week]||{matin:[...cur.matin],am:[...cur.am],nuit:[...cur.nuit]};
+    pushHistory(`Échange: ${src.name} ↔ ${targetName} S${week}`,{overrides});
+    const newOvS={...overrides,[week]:{
+      ...existing,
+      [src.shift]:   [...(existing[src.shift]||[]).filter(n=>n!==src.name),targetName],
+      [targetShift]: [...(existing[targetShift]||[]).filter(n=>n!==targetName),src.name],
+    }};
+    setOverrides(newOvS);
+    save("overrides",newOvS);
+    recompute(operators,absences,leaves,newOvS,yearArchive,weeks);
+    flash(`Échange ${src.name} ↔ ${targetName} S${week} ✓`);
     dragRef.current=null;
   };
 
@@ -784,7 +899,7 @@ export default function App(){
     if(st.leaves)     { setLeaves(newLeaves);         save("leaves",    newLeaves); }
     if(st.overrides)  { setOverrides(newOverrides);  save("overrides", newOverrides); }
     // Recalcul immédiat avec les valeurs restaurées
-    recompute(newOps, newAbsences, newLeaves, newOverrides, weeks);
+    recompute(newOps, newAbsences, newLeaves, newOverrides, yearArchive, weeks);
     const newH=history.slice(1); setHistory(newH); sbSet("history",newH);
     flash(`Annulé : ${last.label}`,"#c62828");
   };
@@ -836,7 +951,8 @@ export default function App(){
   };
 
   const toggleAbsJour = (weekNum, opShort, dateStr, dayLabel) => {
-    if(isWeekLocked(weekNum)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    // Autorisé sur semaine écoulée : le planning archivé ne bouge pas,
+    // mais l'absence réelle est tracée pour la paie.
     const entry=`${opShort}|${weekNum}|${dayLabel}`;
     const cur=(absences[weekNum]||[]);
     const exists=cur.includes(entry);
@@ -891,10 +1007,25 @@ export default function App(){
     {id:"equipe",    label:"Équipe",     icon:"👥"},
   ];
 
+  // Samedis travaillés par opérateur (S1 → fin de fenêtre). Suivi explicite :
+  // c'est souvent là que naît le sentiment d'injustice, plus que sur les nuits.
+  const satCounts = (()=>{
+    const m={}; const shIdx={matin:0,am:1,nuit:2};
+    allSchedules.forEach(sc=>{
+      if(!satWeeks.includes(sc.s)) return;
+      const end={M:0,AM:1,N:2}[satEndPostes[sc.s]||"N"];
+      ["matin","am","nuit"].forEach(k=>{
+        if(shIdx[k]<=end) (sc[k]||[]).forEach(n=>{ m[n]=(m[n]||0)+1; });
+      });
+    });
+    return m;
+  })();
+
   const maxEquity = Math.max(...equity.map(e=>e.total),1);
-  // Seuil d'imbalance basé sur le total des semaines calculées (S1→fin fenêtre)
+  // Seuil d'imbalance au prorata des semaines de présence de chaque opérateur
+  // (un arrivé en S40 n'est pas comparé sur 52 semaines)
   const equityWeeks = startWeek + numWeeks - 1;
-  const imbalance = op => Math.max(op.matin,op.am,op.nuit)-Math.min(op.matin,op.am,op.nuit) > equityWeeks * 0.4;
+  const imbalance = op => Math.max(op.matin,op.am,op.nuit)-Math.min(op.matin,op.am,op.nuit) > Math.max(op.present||equityWeeks,1) * 0.4;
 
   // ── IMPRESSION ────────────────────────────────────────────────────────────────
   const printPlanning = ()=>{
@@ -941,6 +1072,56 @@ export default function App(){
       </table>
     </body></html>`);
     win.document.close();
+  };
+
+  // ── EXPORT CSV (SUIVI & PAIE) ─────────────────────────────────────────────
+  // Une ligne par opérateur et par semaine, de S1 à la fin de la fenêtre :
+  // poste tenu, absences/congés déclarés, samedi travaillé, source (archive/manuel/algo).
+  // Compatible Excel français (séparateur ; et BOM UTF-8).
+  const exportCSV = ()=>{
+    if(!allSchedules.length){flash("Aucune donnée à exporter","#c62828");return;}
+    const shiftIdx={matin:0,am:1,nuit:2};
+    const lines=[["Semaine","Dates","Operateur","Niveau","Poste","Absences / Conges","Samedi travaille","Source"].join(";")];
+    allSchedules.forEach(sc=>{
+      const m=getMondayOfWeek(sc.s,year), end=new Date(m); end.setDate(m.getDate()+4);
+      const dates=`${fmtDate(m)} - ${fmtDate(end)}`;
+      const hasSat=satWeeks.includes(sc.s);
+      const satEnd={M:0,AM:1,N:2}[satEndPostes[sc.s]||"N"];
+      operators.forEach(op=>{
+        const assigned=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
+        // hors fenêtre de présence ou inactif sans affectation → pas de ligne
+        if(op.fromWeek&&sc.s<op.fromWeek&&!assigned) return;
+        if(op.toWeek&&sc.s>op.toWeek&&!assigned) return;
+        if(!op.active&&!assigned) return;
+        let poste="Repos", key=null;
+        if((sc.matin||[]).includes(op.short)){poste="Matin";key="matin";}
+        else if((sc.am||[]).includes(op.short)){poste="AM";key="am";}
+        else if((sc.nuit||[]).includes(op.short)){poste="Nuit";key="nuit";}
+        else if(op.isVolant){poste="Journee";}
+        const ann=[];
+        (absences[sc.s]||[]).forEach(e=>{
+          if(e===op.short) ann.push("Absent (semaine)");
+          else if(e.startsWith(op.short+"|")) ann.push(`Absent ${e.split("|")[2]}`);
+        });
+        (leaves[sc.s]||[]).forEach(e=>{
+          if(e===op.short) ann.push("Conge (semaine)");
+          else if(e.startsWith(op.short+":")){
+            const[,range]=e.split(":");const[sd,ed]=range.split("-").map(Number);
+            ann.push(`Conge ${DAYS_FR[sd]}-${DAYS_FR[ed]}`);
+          }
+        });
+        const sat = hasSat&&key!==null&&shiftIdx[key]<=satEnd ? "Oui":"Non";
+        const source = sc.isArchived?"Archive (fige)":sc.isOverridden?"Ajustement manuel":"Algorithme";
+        lines.push([`S${sc.s}`,dates,op.full,op.level,poste,ann.join(" + "),sat,source].join(";"));
+      });
+    });
+    const blob=new Blob(["\ufeff"+lines.join("\r\n")],{type:"text/csv;charset=utf-8;"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;
+    a.download=`neolitik-suivi-${year}-S1-S${allSchedules[allSchedules.length-1].s}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+    flash("Export CSV généré — ouvrable dans Excel pour la paie");
   };
 
   // ── RENDER ────────────────────────────────────────────────────────────────
@@ -1053,6 +1234,10 @@ export default function App(){
                   title="Ouvrir une version imprimable du planning">
                   🖨 Imprimer
                 </button>
+                <button onClick={exportCSV} style={{padding:"6px 14px",borderRadius:7,background:"#fff",color:"#333",border:"1px solid #ccc",cursor:"pointer",fontSize:13}}
+                  title="Exporter S1 → fin de fenêtre en CSV (Excel) : poste par opérateur, absences, congés, samedis — pour la paie">
+                  ⬇ CSV paie
+                </button>
                 {[{k:"liste",l:"📋 Liste"},{k:"colonnes",l:"🗂 Colonnes"},{k:"jours",l:"📆 Jours"}].map(v=>(
                   <button key={v.k} onClick={()=>setView(v.k)} style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:view===v.k?BRAND:"#fff",color:view===v.k?"#fff":"#333",cursor:"pointer",fontSize:13}}>{v.l}</button>
                 ))}
@@ -1146,6 +1331,7 @@ export default function App(){
             {/* Légende */}
             <div style={{fontSize:12,color:"#555",marginBottom:10,background:"#f0f4ff",border:"1px solid #c5cae9",borderRadius:7,padding:"8px 12px"}}>
               💡 <strong>Glissement :</strong> faites glisser un opérateur d'un poste à un autre pour un ajustement ponctuel — marqué ✏.<br/>
+              🔁 <strong>Échange :</strong> déposez un opérateur <em>sur</em> un autre opérateur pour échanger leurs postes en un geste (arrangement entre ouvriers).<br/>
               🔄 <strong>Recalculer :</strong> absorbe tous les ajustements manuels comme nouvelle base et repart de l'algorithme.
             </div>
 
@@ -1193,6 +1379,7 @@ export default function App(){
                                   {ops_in_shift.map(n=>(
                                     <OpChip key={n} name={chipName(n)} operators={operators} draggable
                                       onDragStart={()=>onDragStart(sc.s,sh.key,n)}
+                                      onDropChip={()=>onSwap(sc.s,sh.key,n)}
                                       highlight={!!(highlightOp&&n===highlightOp)}/>
                                   ))}
                                 </div>
@@ -1269,6 +1456,7 @@ export default function App(){
                               {ops_in_shift.map(n=>(
                                 <OpChip key={n} name={chipName(n)} operators={operators} draggable
                                   onDragStart={()=>onDragStart(sc.s,sh.key,n)}
+                                  onDropChip={()=>onSwap(sc.s,sh.key,n)}
                                   highlight={!!(highlightOp&&n===highlightOp)}/>
                               ))}
                             </div>
@@ -1353,7 +1541,7 @@ export default function App(){
                           <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
                             <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:160}}>
                               Opérateur
-                              {!locked&&<span style={{display:"block",fontSize:9,color:"#bbb",fontWeight:400}}>clic cellule = absent ce jour</span>}
+                              <span style={{display:"block",fontSize:9,color:"#bbb",fontWeight:400}}>clic cellule = absent ce jour</span>
                             </th>
                             {days.map(({d,dateStr,isFerie,isSat,isChome})=>(
                               <th key={d}
@@ -1380,8 +1568,8 @@ export default function App(){
                             const opsInShift=sc[key]||[];
                             if(!opsInShift.length) return null;
                             return(
-                              <>
-                                <tr key={`hdr-${key}`}>
+                              <React.Fragment key={key}>
+                                <tr>
                                   <td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc,letterSpacing:.3}}>{label}</td>
                                 </tr>
                                 {opsInShift.map(short=>{
@@ -1403,10 +1591,10 @@ export default function App(){
                                         const postLabel=key==="matin"?"M":key==="am"?"AM":"N";
                                         return(
                                           <td key={d}
-                                            onClick={()=>!locked&&!isOff&&!isChome&&toggleAbsJour(sc.s,short,dateStr,dayLabel)}
+                                            onClick={()=>!isOff&&!isChome&&toggleAbsJour(sc.s,short,dateStr,dayLabel)}
                                             style={{padding:"4px 6px",textAlign:"center",
                                               background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent",
-                                              cursor:locked||isOff||isChome?"default":"pointer"}}>
+                                              cursor:isOff||isChome?"default":"pointer"}}>
                                             <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
                                               {isOff||isChome||isAbsent?"—":postLabel}
                                             </span>
@@ -1417,7 +1605,7 @@ export default function App(){
                                     </tr>
                                   );
                                 })}
-                              </>
+                              </React.Fragment>
                             );
                           })}
 
@@ -1446,10 +1634,10 @@ export default function App(){
                                       }
                                       return(
                                         <td key={d}
-                                          onClick={()=>!locked&&!isChome&&toggleAbsJour(sc.s,op.short,dateStr,dayLabel)}
+                                          onClick={()=>!isChome&&toggleAbsJour(sc.s,op.short,dateStr,dayLabel)}
                                           style={{padding:"4px 6px",textAlign:"center",
                                             background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent",
-                                            cursor:locked||isChome?"default":"pointer"}}>
+                                            cursor:isChome?"default":"pointer"}}>
                                           <span style={{background:isChome||isAbsent?"#f5f5f5":"#EDE7F6",color:isChome||isAbsent?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
                                             {isChome||isAbsent?"—":"J"}
                                           </span>
@@ -1531,7 +1719,13 @@ export default function App(){
         {/* ══ HISTORIQUE ══ */}
         {tab==="absences"&&(
           <div>
-            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Historique absences ponctuelles</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div style={{fontWeight:600,fontSize:15}}>Historique absences ponctuelles</div>
+              <button onClick={exportCSV} style={{padding:"6px 14px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}
+                title="Export complet S1 → fin de fenêtre : poste par opérateur, absences, congés, samedis — pour la paie">
+                ⬇ Export CSV paie
+              </button>
+            </div>
             {Object.keys(absences).length===0
               ?<div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"24px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune absence</div>
               :(
@@ -1609,7 +1803,9 @@ export default function App(){
                     <th style={{padding:"10px 14px",textAlign:"center",color:"#1B5E20"}}>Matin</th>
                     <th style={{padding:"10px 14px",textAlign:"center",color:"#F57F17"}}>AM</th>
                     <th style={{padding:"10px 14px",textAlign:"center",color:"#0D47A1"}}>Nuit</th>
+                    <th style={{padding:"10px 14px",textAlign:"center",color:"#e65100"}} title="Samedis travaillés (semaines avec samedi activé)">Samedis</th>
                     <th style={{padding:"10px 14px",textAlign:"center"}}>Total</th>
+                    <th style={{padding:"10px 14px",textAlign:"center"}} title="Semaines de présence (fenêtre arrivée/départ)">Présence</th>
                     <th style={{padding:"10px 14px",textAlign:"center"}}>Équilibre</th>
                   </tr>
                 </thead>
@@ -1633,10 +1829,17 @@ export default function App(){
                           </td>
                         ))}
                         <td style={{padding:"8px 14px",textAlign:"center"}}>
+                          <span style={{fontWeight:600,color:(satCounts[op.short]||0)>0?"#e65100":"#bbb"}}>{satCounts[op.short]||0}</span>
+                        </td>
+                        <td style={{padding:"8px 14px",textAlign:"center"}}>
                           <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
                             <div style={{width:Math.round((op.total/maxEquity)*60),height:8,background:"#ccc",borderRadius:4,minWidth:2}}/>
                             <span style={{fontWeight:600}}>{op.total}</span>
                           </div>
+                        </td>
+                        <td style={{padding:"8px 14px",textAlign:"center",fontSize:12,color:"#666"}}>
+                          {op.present||0} sem.
+                          {(op.fromWeek||op.toWeek)&&<span style={{display:"block",fontSize:10,color:"#999"}}>{op.fromWeek?`S${op.fromWeek}`:"S1"} → {op.toWeek?`S${op.toWeek}`:"…"}</span>}
                         </td>
                         <td style={{padding:"8px 14px",textAlign:"center"}}>
                           {imb
@@ -1804,6 +2007,7 @@ export default function App(){
             </div>
             <div style={{background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:7,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#2e7d32"}}>
               ℹ️ Tout opérateur actif est intégré automatiquement à l'algorithme. Avec 4 N4 actifs, l'algo tourne sur les 4 et laisse l'un d'eux en repos chaque semaine — il prend le relais dès qu'un autre est absent. Utilisez "Passer volant" pour exclure un opérateur du planning auto (glissement manuel uniquement).
+              <br/>👋 <strong>Arrivée / Départ</strong> : renseignez la semaine d'embauche ou de fin de contrat — l'opérateur n'est planifié que sur sa période, et sa charge est équilibrée au prorata de sa présence. Les semaines écoulées sont archivées : un départ ne réécrit jamais l'historique (paie fiable). Préférez "Départ S" à la suppression 🗑 pour garder la trace.
             </div>
             {activeOps.length<8&&(
               <div style={{background:"#fff8e1",border:"1px solid #ffe082",borderRadius:7,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#f57f17"}}>
@@ -1844,6 +2048,20 @@ export default function App(){
                     </div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    {/* Fenêtre de présence : arrivée/départ en cours d'année.
+                        Vide = présent toute l'année. L'algo n'affecte l'opérateur
+                        que sur ses semaines de présence, et l'équité est calculée
+                        au prorata (un arrivant en S40 n'est pas surchargé). */}
+                    <div style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"#888"}}>
+                      <span title="Première semaine travaillée (vide = depuis S1)">Arrivée S</span>
+                      <input type="number" min={1} max={52} value={op.fromWeek||""} placeholder="1"
+                        onChange={e=>saveOperators(operators.map(o=>o.id===op.id?{...o,fromWeek:e.target.value?Number(e.target.value):undefined}:o))}
+                        style={{width:46,padding:"3px 5px",borderRadius:5,border:"1px solid #ddd",fontSize:11}}/>
+                      <span title="Dernière semaine travaillée (vide = jusqu'à S52)">Départ S</span>
+                      <input type="number" min={1} max={52} value={op.toWeek||""} placeholder="52"
+                        onChange={e=>saveOperators(operators.map(o=>o.id===op.id?{...o,toWeek:e.target.value?Number(e.target.value):undefined}:o))}
+                        style={{width:46,padding:"3px 5px",borderRadius:5,border:"1px solid #ddd",fontSize:11}}/>
+                    </div>
                     <LevelBadge level={op.level}/>
                     <button onClick={()=>toggleVolant(op.id)}
                       style={{padding:"4px 12px",borderRadius:6,border:`1px solid ${op.isVolant?"#a5d6a7":"#ccc"}`,background:op.isVolant?"#e8f5e9":"#fff",cursor:"pointer",fontSize:12,color:op.isVolant?"#2e7d32":"#555"}}
