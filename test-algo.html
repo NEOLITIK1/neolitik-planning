@@ -695,6 +695,24 @@ section("22. Heures — seuil hebdo 35h et heures sup");
   assert("Heures sup réparties au prorata (4j/2j) ≈ 4,67 + 2,33", Math.abs(supA+supB-7)<1e-9 && Math.abs(supA-7*28/42)<1e-9);
 }
 
+// ── 23. HEURES — jour aménagé : nuit recalculée d'après les horaires ────
+section("23. Heures — jour aménagé (horaires décalés → nuit recalculée)");
+{
+  const PAID=7, NW=[22,6];
+  const ov=(a,b,lo,hi)=>Math.max(0,Math.min(b,hi)-Math.max(a,lo));
+  const dec=s=>{const[h,m]=s.split(":").map(Number);return h+(m||0)/60;};
+  const nightWin=(sS,eS)=>{let s=dec(sS),e=dec(eS); if(e<=s)e+=24; const[ns,ne]=NW; return Math.min(ov(s,e,ns,ne+24)+ov(s,e,ns-24,ne),PAID);};
+  // Exemple dirigeant : Matin 8–16, AM 11–19, Nuit 14–22 → personne en heures de nuit ce jour-là
+  assert("Aménagé Matin 8h–16h : 0h de nuit", Math.abs(nightWin("08:00","16:00"))<1e-9, nightWin("08:00","16:00"));
+  assert("Aménagé AM 11h–19h : 0h de nuit", Math.abs(nightWin("11:00","19:00"))<1e-9, nightWin("11:00","19:00"));
+  assert("Aménagé Nuit 14h–22h : 0h de nuit", Math.abs(nightWin("14:00","22:00"))<1e-9, nightWin("14:00","22:00"));
+  // Cohérence : les horaires standards via fenêtre = mêmes valeurs que le calcul par poste
+  assert("Standard Nuit 21h50–6h via fenêtre = 7h", Math.abs(nightWin("21:50","06:00")-7)<1e-9, nightWin("21:50","06:00"));
+  assert("Standard Matin 5h50–14h via fenêtre = 0h10", Math.abs(nightWin("05:50","14:00")-10/60)<1e-9, nightWin("05:50","14:00"));
+  // Créneau de nuit partiel : 20h–4h → nuit = 22h→4h = 6h
+  assert("Créneau 20h–4h : 6h de nuit (22h→4h)", Math.abs(nightWin("20:00","04:00")-6)<1e-9, nightWin("20:00","04:00"));
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // RÉSUMÉ
 // ════════════════════════════════════════════════════════════════════════

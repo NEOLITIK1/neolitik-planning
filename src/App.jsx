@@ -104,6 +104,35 @@ function daysInMonth(year, month /*0-11*/){ return new Date(year, month+1, 0).ge
 // Heures décimales → "Hh MM" (ex. 7 → "7h00", 0,1667 → "0h10", 35,5 → "35h30")
 function fmtHours(h){ const m=Math.round(h*60); return `${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}`; }
 
+// ── JOURS À HORAIRES AMÉNAGÉS ────────────────────────────────────────────────
+// Ce jour-là, les 3 équipes décalent leurs horaires pour se chevaucher.
+// Affectations + total payé (7h) inchangés ; seules les heures de NUIT sont
+// recalculées d'après les horaires saisis. Stocké : { matin:{s,e}, am, nuit, commun }.
+const AMENAGE_DEFAULT = { matin:{s:"05:50",e:"14:00"}, am:{s:"13:50",e:"22:00"}, nuit:{s:"21:50",e:"06:00"}, commun:"" };
+function hhmmToDec(str){ const [h,m]=String(str||"0:0").split(":").map(Number); return (h||0)+(m||0)/60; }
+function nightHoursForWindow(sStr,eStr){
+  let s=hhmmToDec(sStr), e=hhmmToDec(eStr);
+  if(e<=s) e+=24; // créneau qui traverse minuit
+  const [ns,ne]=NIGHT_WINDOW;
+  return Math.min(overlapHours(s,e,ns,ne+24)+overlapHours(s,e,ns-24,ne), PAID_HOURS_PER_SHIFT);
+}
+function fmtClock(str){ const [h,m]=String(str||"0:0").split(":").map(Number); return `${h}h${m?String(m).padStart(2,"0"):""}`; }
+// Résumé des horaires aménagés affiché dans l'en-tête d'un jour (admin + public)
+function AmenageSummary({entry}){
+  if(entry && typeof entry==="object"){
+    return (
+      <span style={{display:"block",fontSize:9,fontWeight:400,color:"#4527A0",lineHeight:1.5}}>
+        M {fmtClock(entry.matin.s)}–{fmtClock(entry.matin.e)}<br/>
+        AM {fmtClock(entry.am.s)}–{fmtClock(entry.am.e)}<br/>
+        N {fmtClock(entry.nuit.s)}–{fmtClock(entry.nuit.e)}
+        {entry.commun?<span style={{display:"block",color:"#7E57C2",fontWeight:600}}>↔ {entry.commun}</span>:null}
+      </span>
+    );
+  }
+  if(typeof entry==="string" && entry) return <span style={{display:"block",fontSize:9,fontWeight:400,color:"#7E57C2"}}>↔ {entry}</span>;
+  return null;
+}
+
 // ── UTILITAIRES DATE ──────────────────────────────────────────────────────────
 function getMondayOfWeek(w,year){
   const jan1=new Date(year,0,1),d=jan1.getDay()||7;
@@ -477,7 +506,7 @@ function PublicView() {
             const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
             const isChome=!!((joursChomes||{})[`${sc.s}-${dateStr}`]);
             const isAmenage=(joursAmenages||{})[`${sc.s}-${dateStr}`]!==undefined;
-            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5,isChome,isAmenage,amenageTxt:(joursAmenages||{})[`${sc.s}-${dateStr}`]||""};
+            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5,isChome,isAmenage,amenage:(joursAmenages||{})[`${sc.s}-${dateStr}`]};
           });
           const note=(notes||{})[sc.s];
           const end=new Date(m); end.setDate(m.getDate()+(numDays-1));
@@ -494,7 +523,7 @@ function PublicView() {
                   <thead>
                     <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
                       <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:150}}>Opérateur</th>
-                      {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenageTxt})=>(
+                      {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenage})=>(
                         <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
                           color:isChome?"#aaa":isSat?"#e65100":"#666",minWidth:70,
                           background:isAmenage&&!isChome?"#EDE7F6":"transparent",
@@ -505,7 +534,8 @@ function PublicView() {
                             {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
                           </span>
                           {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
-                          {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}} title={amenageTxt}>⇄ Aménagé</span>}
+                          {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}}>⇄ Aménagé</span>}
+                          {isAmenage&&!isChome&&<AmenageSummary entry={amenage}/>}
                         </th>
                       ))}
                     </tr>
@@ -628,6 +658,7 @@ function AdminApp(){
   const [hoursMonth,setHoursMonth] = useState(()=>new Date().getMonth());   // 0-11, récap d'heures
   const [hoursYear,setHoursYear]   = useState(()=>new Date().getFullYear());
   const [history,setHistory]     = useState([]);
+  const [redoStack,setRedoStack] = useState([]); // états rétablissables (annulés)
   const [startWeek,setStartWeek] = useState(()=>getCurrentWeek(new Date().getFullYear()));
   const [numWeeks,setNumWeeks]   = useState(5);
   const [view,setView]           = useState("liste");
@@ -648,6 +679,8 @@ function AdminApp(){
   const [loaded,setLoaded]       = useState(false);
   const [publishModal,setPublishModal] = useState(false);
   const [publishNbWeeks,setPublishNbWeeks] = useState(3);
+  const [amenageEdit,setAmenageEdit]   = useState(null); // { week, dateStr, dayLabel } | null
+  const [amenageDraft,setAmenageDraft] = useState(null); // { matin:{s,e}, am, nuit, commun }
   const dragRef = useRef(null);
 
   const weeks = Array.from({length:numWeeks},(_,i)=>startWeek+i);
@@ -663,14 +696,14 @@ function AdminApp(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,ar,sw,sep,jc,ja,nt,hi,yr]=await Promise.all([
+        const [ops,abs,lv,ov,ar,sw,sep,jc,ja,nt,hi,rs,yr]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),sbGet("archive"),
-          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("joursamenages"),sbGet("notes"),sbGet("history"),sbGet("year"),
+          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("joursamenages"),sbGet("notes"),sbGet("history"),sbGet("redostack"),sbGet("year"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
         if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov); if(ar)setArchive(ar);
         if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep); if(jc)setJoursChomes(jc); if(ja)setJoursAmenages(ja);
-        if(nt)setNotes(nt); if(hi)setHistory(hi);
+        if(nt)setNotes(nt); if(hi)setHistory(hi); if(rs)setRedoStack(rs);
         if(yr)setYear(Number(yr));
         setSyncMsg("Synchronisé ✓");
       }catch(e){setSyncMsg(`Erreur: ${e.message}`);}
@@ -701,6 +734,8 @@ function AdminApp(){
       const next=[{label,ts:Date.now(),state},...prev].slice(0,15);
       sbSet("history",next); return next;
     });
+    // Toute nouvelle action invalide la pile de rétablissement
+    setRedoStack([]); sbSet("redostack",[]);
   },[]);
 
   // ── CALCUL PLANNING
@@ -922,22 +957,44 @@ function AdminApp(){
     dragRef.current=null;
   };
 
-  // ── UNDO
+  // ── UNDO / REDO ───────────────────────────────────────────────────────────
+  // history = états AVANT chaque action ; redoStack = états annulés, rétablissables.
+  // Chaque entrée ne stocke que les clés touchées (operators/absences/leaves/overrides).
+  // Capture les valeurs actuelles des clés présentes dans un modèle d'état.
+  const snapshotKeys = tpl =>{
+    const s={};
+    if(tpl.operators!==undefined) s.operators=operators;
+    if(tpl.absences!==undefined)  s.absences=absences;
+    if(tpl.leaves!==undefined)    s.leaves=leaves;
+    if(tpl.overrides!==undefined) s.overrides=overrides;
+    return s;
+  };
+  // Applique un état partiel (les clés absentes gardent la valeur courante).
+  const applyState = st =>{
+    const nOps=st.operators||operators, nAbs=st.absences||absences, nLv=st.leaves||leaves, nOv=st.overrides||overrides;
+    if(st.operators)  { setOperators(nOps);  sbSetOps(nOps); }
+    if(st.absences)   { setAbsences(nAbs);   save("absences", nAbs); }
+    if(st.leaves)     { setLeaves(nLv);      save("leaves",   nLv); }
+    if(st.overrides)  { setOverrides(nOv);   save("overrides",nOv); }
+    recompute(nOps, nAbs, nLv, nOv, yearArchive, weeks);
+  };
   const undoLast = ()=>{
     if(!history.length)return;
-    const last=history[0],st=last.state;
-    const newOps      = st.operators  || operators;
-    const newAbsences = st.absences   || absences;
-    const newLeaves   = st.leaves     || leaves;
-    const newOverrides= st.overrides  || overrides;
-    if(st.operators)  { setOperators(newOps);        sbSetOps(newOps); }
-    if(st.absences)   { setAbsences(newAbsences);    save("absences",  newAbsences); }
-    if(st.leaves)     { setLeaves(newLeaves);         save("leaves",    newLeaves); }
-    if(st.overrides)  { setOverrides(newOverrides);  save("overrides", newOverrides); }
-    // Recalcul immédiat avec les valeurs restaurées
-    recompute(newOps, newAbsences, newLeaves, newOverrides, yearArchive, weeks);
+    const last=history[0];
+    const redoEntry={label:last.label, state:snapshotKeys(last.state)}; // état actuel, avant restauration
+    applyState(last.state);
     const newH=history.slice(1); setHistory(newH); sbSet("history",newH);
+    const newR=[redoEntry,...redoStack].slice(0,15); setRedoStack(newR); sbSet("redostack",newR);
     flash(`Annulé : ${last.label}`,"#c62828");
+  };
+  const redoLast = ()=>{
+    if(!redoStack.length)return;
+    const next=redoStack[0];
+    const histEntry={label:next.label, ts:Date.now(), state:snapshotKeys(next.state)};
+    applyState(next.state);
+    const newR=redoStack.slice(1); setRedoStack(newR); sbSet("redostack",newR);
+    const newH=[histEntry,...history].slice(0,15); setHistory(newH); sbSet("history",newH);
+    flash(`Rétabli : ${next.label}`,"#2e7d32");
   };
 
   // ── ÉQUIPE
@@ -986,16 +1043,31 @@ function AdminApp(){
     saveJoursChomes(next);
   };
 
-  // Jour à horaires aménagés : les 3 postes se décalent pour se chevaucher sur un
-  // créneau (info équipe). Les affectations et les heures payées ne changent pas.
-  const toggleJourAmenage = (weekNum, dateStr) => {
+  // Jour à horaires aménagés : ouvre l'éditeur d'horaires (3 équipes décalées
+  // pour se chevaucher). Affectations + total 7h inchangés ; nuit recalculée.
+  const openAmenage = (weekNum, dateStr, dayLabel) => {
     if(isWeekLocked(weekNum)){flash("Semaine écoulée — modification impossible","#c62828");return;}
-    const key=`${weekNum}-${dateStr}`;
-    const next={...joursAmenages};
-    if(next[key]!==undefined){ delete next[key]; saveJoursAmenages(next); flash("Horaires aménagés retirés"); return; }
-    const txt=(window.prompt("Créneau de chevauchement (ex. « tous présents 10h–13h ») — optionnel :","")||"").trim();
-    next[key]=txt; saveJoursAmenages(next);
-    flash("Jour marqué « horaires aménagés »");
+    const existing=joursAmenages[`${weekNum}-${dateStr}`];
+    const draft = (existing && typeof existing==="object")
+      ? {matin:{...existing.matin}, am:{...existing.am}, nuit:{...existing.nuit}, commun:existing.commun||""}
+      : JSON.parse(JSON.stringify(AMENAGE_DEFAULT));
+    setAmenageDraft(draft);
+    setAmenageEdit({week:weekNum, dateStr, dayLabel});
+  };
+  const saveAmenage = () => {
+    if(!amenageEdit)return;
+    const key=`${amenageEdit.week}-${amenageEdit.dateStr}`;
+    saveJoursAmenages({...joursAmenages,[key]:amenageDraft});
+    setAmenageEdit(null); setAmenageDraft(null);
+    flash("Horaires aménagés enregistrés");
+  };
+  const removeAmenage = () => {
+    if(!amenageEdit)return;
+    const key=`${amenageEdit.week}-${amenageEdit.dateStr}`;
+    const next={...joursAmenages}; delete next[key];
+    saveJoursAmenages(next);
+    setAmenageEdit(null); setAmenageDraft(null);
+    flash("Horaires aménagés retirés");
   };
 
   const toggleAbsJour = (weekNum, opShort, dateStr, dayLabel) => {
@@ -1208,7 +1280,10 @@ function AdminApp(){
         return offset+1>=sd && offset+1<=ed;
       });
       if(partialLeave) return null;
-      return { total:PAID_HOURS_PER_SHIFT, night:NIGHT_HOURS[key] };
+      // Jour à horaires aménagés : total inchangé (7h), nuit recalculée d'après le créneau saisi
+      const am=joursAmenages[`${sc.s}-${dateStr}`];
+      const night=(am && typeof am==="object" && am[key]) ? nightHoursForWindow(am[key].s, am[key].e) : NIGHT_HOURS[key];
+      return { total:PAID_HOURS_PER_SHIFT, night };
     };
 
     const res={};
@@ -1258,7 +1333,7 @@ function AdminApp(){
 
   const monthHours = React.useMemo(
     ()=> tab==="heures" ? computeMonthHours(hoursYear, hoursMonth) : [],
-    [tab, hoursYear, hoursMonth, operators, absences, leaves, overrides, archive, satWeeks, satEndPostes, joursChomes]
+    [tab, hoursYear, hoursMonth, operators, absences, leaves, overrides, archive, satWeeks, satEndPostes, joursChomes, joursAmenages]
   );
   const monthTotals = monthHours.reduce((a,r)=>({
     total:a.total+r.total, night:a.night+r.night, sup:a.sup+r.sup, normal:a.normal+r.normal, days:a.days+r.days, sat:a.sat+r.sat,
@@ -1337,6 +1412,45 @@ function AdminApp(){
         </div>
       )}
 
+      {/* Modale Horaires aménagés */}
+      {amenageEdit&&amenageDraft&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
+          <div style={{background:"#fff",borderRadius:12,width:480,maxWidth:"94vw",padding:24,boxShadow:"0 8px 40px rgba(0,0,0,.18)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontWeight:600,fontSize:15}}>⇄ Horaires aménagés — {amenageEdit.dayLabel} {amenageEdit.dateStr}</span>
+              <button onClick={()=>{setAmenageEdit(null);setAmenageDraft(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#666"}}>×</button>
+            </div>
+            <p style={{fontSize:12,color:"#666",margin:"0 0 16px",lineHeight:1.5}}>
+              Ce jour-là, les 3 équipes ne tournent pas en 3×8 classique : on décale leurs horaires pour créer un chevauchement. Les affectations et le total d'heures (7h/personne) ne changent pas, mais les <strong>heures de nuit sont recalculées</strong> d'après ces horaires.
+            </p>
+            {[
+              {key:"matin",label:"🌅 Matin",tc:"#1B5E20"},
+              {key:"am",   label:"🌆 Après-midi",tc:"#F57F17"},
+              {key:"nuit", label:"🌙 Nuit",tc:"#0D47A1"},
+            ].map(({key,label,tc})=>(
+              <div key={key} style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+                <span style={{width:104,fontWeight:600,color:tc,fontSize:13}}>{label}</span>
+                <input type="time" value={amenageDraft[key].s} onChange={e=>setAmenageDraft(d=>({...d,[key]:{...d[key],s:e.target.value}}))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+                <span style={{color:"#888"}}>→</span>
+                <input type="time" value={amenageDraft[key].e} onChange={e=>setAmenageDraft(d=>({...d,[key]:{...d[key],e:e.target.value}}))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+                <span style={{fontSize:11,color:"#0D47A1"}} title="Heures de nuit (22h–6h) pour ce créneau">→ nuit {fmtHours(nightHoursForWindow(amenageDraft[key].s,amenageDraft[key].e))}</span>
+              </div>
+            ))}
+            <div style={{display:"flex",alignItems:"center",gap:10,marginTop:14,marginBottom:18}}>
+              <span style={{fontSize:13,fontWeight:500,color:"#555",whiteSpace:"nowrap"}}>Créneau commun :</span>
+              <input value={amenageDraft.commun} onChange={e=>setAmenageDraft(d=>({...d,commun:e.target.value}))} placeholder="ex. 14h–16h tous présents" style={{flex:1,padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+            </div>
+            <div style={{display:"flex",gap:10,justifyContent:"space-between",alignItems:"center"}}>
+              <button onClick={removeAmenage} style={{padding:"8px 14px",borderRadius:7,border:"1px solid #ef9a9a",background:"#fff5f5",color:"#c62828",cursor:"pointer",fontSize:13}}>Retirer l'aménagement</button>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>{setAmenageEdit(null);setAmenageDraft(null);}} style={{padding:"8px 16px",borderRadius:7,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:13}}>Annuler</button>
+                <button onClick={saveAmenage} style={{padding:"8px 20px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>Enregistrer</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{background:BRAND,color:"#fff",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:52,position:"sticky",top:0,zIndex:100}}>
         <span style={{fontWeight:700,fontSize:18,letterSpacing:1.5}}>NEOLITIK</span>
@@ -1345,6 +1459,12 @@ function AdminApp(){
             <button onClick={undoLast} title={`Annuler : ${history[0]?.label}`}
               style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",borderRadius:6,cursor:"pointer",padding:"4px 10px",fontSize:12,color:"#fff"}}>
               ↩ Annuler
+            </button>
+          )}
+          {redoStack.length>0&&(
+            <button onClick={redoLast} title={`Rétablir : ${redoStack[0]?.label}`}
+              style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",borderRadius:6,cursor:"pointer",padding:"4px 10px",fontSize:12,color:"#fff"}}>
+              ↪ Rétablir
             </button>
           )}
           <button onClick={()=>setPublishModal(true)} style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",borderRadius:6,cursor:"pointer",padding:"4px 12px",fontSize:12,color:"#fff"}}>
@@ -1635,7 +1755,7 @@ function AdminApp(){
             {view==="jours"&&(
               <div style={{overflowX:"auto"}}>
                 <div style={{fontSize:12,color:"#4527A0",marginBottom:10,background:"#EDE7F6",border:"1px solid #d1c4e9",borderRadius:7,padding:"8px 12px"}}>
-                  ⇄ <strong>Jour aménagé :</strong> dans l'en-tête d'un jour, cliquez « aménager » pour signaler un jour à horaires décalés (postes qui se chevauchent, ex. créneau commun). Les affectations et les heures payées ne changent pas — c'est une info pour l'équipe.
+                  ⇄ <strong>Jour aménagé :</strong> dans l'en-tête d'un jour, cliquez « aménager » pour fixer des horaires décalés par équipe ce jour-là (ex. Matin 8h–16h, AM 11h–19h, Nuit 14h–22h) afin de créer un chevauchement. Les affectations et le total d'heures (7h/personne) restent inchangés, mais les <strong>heures de nuit sont recalculées</strong> d'après ces horaires (visibles dans l'onglet Heures et sur le lien équipe).
                 </div>
                 {schedules.map(sc=>{
                   const hasSat=satWeeks.includes(sc.s);
@@ -1660,7 +1780,7 @@ function AdminApp(){
                     const isChome=!!joursChomes[`${sc.s}-${dateStr}`];
                     const amKey=`${sc.s}-${dateStr}`;
                     const isAmenage=joursAmenages[amKey]!==undefined;
-                    return{d,date,dateStr,isFerie,isSat,isChome,isAmenage,amenageTxt:joursAmenages[amKey]||""};
+                    return{d,date,dateStr,isFerie,isSat,isChome,isAmenage,amenage:joursAmenages[amKey]};
                   });
 
                   // Opérateurs groupés par poste
@@ -1710,7 +1830,7 @@ function AdminApp(){
                               Opérateur
                               <span style={{display:"block",fontSize:9,color:"#bbb",fontWeight:400}}>clic cellule = absent ce jour</span>
                             </th>
-                            {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenageTxt})=>(
+                            {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenage})=>(
                               <th key={d}
                                 onClick={()=>!locked&&toggleJourChome(sc.s,dateStr)}
                                 style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
@@ -1725,10 +1845,11 @@ function AdminApp(){
                                   {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
                                 </span>
                                 {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
-                                {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}} title={amenageTxt}>⇄ Aménagé{amenageTxt?` (${amenageTxt})`:""}</span>}
+                                {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}}>⇄ Aménagé</span>}
+                                {isAmenage&&!isChome&&<AmenageSummary entry={amenage}/>}
                                 {!locked&&!isChome&&(
                                   <span style={{display:"block",fontSize:8,color:"#ccc",fontWeight:400}}>
-                                    clic = chômer · <span onClick={e=>{e.stopPropagation();toggleJourAmenage(sc.s,dateStr);}} style={{color:"#7E57C2",cursor:"pointer",textDecoration:"underline"}}>{isAmenage?"normal":"aménager"}</span>
+                                    clic = chômer · <span onClick={e=>{e.stopPropagation();openAmenage(sc.s,dateStr,["Lun","Mar","Mer","Jeu","Ven","Sam"][d]);}} style={{color:"#7E57C2",cursor:"pointer",textDecoration:"underline"}}>{isAmenage?"modifier horaires":"aménager"}</span>
                                   </span>
                                 )}
                               </th>
@@ -1941,7 +2062,19 @@ function AdminApp(){
                 </div>
               )
             }
-            <div style={{fontWeight:600,fontSize:15,marginBottom:14}}>Journal des actions</div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+              <div style={{fontWeight:600,fontSize:15}}>Journal des actions</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={undoLast} disabled={!history.length}
+                  style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:history.length?"#fff":"#f5f5f5",color:history.length?"#c62828":"#bbb",cursor:history.length?"pointer":"default",fontSize:12,fontWeight:600}}>
+                  ↩ Annuler
+                </button>
+                <button onClick={redoLast} disabled={!redoStack.length}
+                  style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:redoStack.length?"#fff":"#f5f5f5",color:redoStack.length?"#2e7d32":"#bbb",cursor:redoStack.length?"pointer":"default",fontSize:12,fontWeight:600}}>
+                  ↪ Rétablir{redoStack.length?` (${redoStack.length})`:""}
+                </button>
+              </div>
+            </div>
             {history.length===0
               ?<div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"20px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune action</div>
               :(
