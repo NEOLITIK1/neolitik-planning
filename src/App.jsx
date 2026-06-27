@@ -117,20 +117,19 @@ function nightHoursForWindow(sStr,eStr){
   return Math.min(overlapHours(s,e,ns,ne+24)+overlapHours(s,e,ns-24,ne), PAID_HOURS_PER_SHIFT);
 }
 function fmtClock(str){ const [h,m]=String(str||"0:0").split(":").map(Number); return `${h}h${m?String(m).padStart(2,"0"):""}`; }
-// Résumé des horaires aménagés affiché dans l'en-tête d'un jour (admin + public)
-function AmenageSummary({entry}){
-  if(entry && typeof entry==="object"){
-    return (
-      <span style={{display:"block",fontSize:9,fontWeight:400,color:"#4527A0",lineHeight:1.5}}>
-        M {fmtClock(entry.matin.s)}–{fmtClock(entry.matin.e)}<br/>
-        AM {fmtClock(entry.am.s)}–{fmtClock(entry.am.e)}<br/>
-        N {fmtClock(entry.nuit.s)}–{fmtClock(entry.nuit.e)}
-        {entry.commun?<span style={{display:"block",color:"#7E57C2",fontWeight:600}}>↔ {entry.commun}</span>:null}
-      </span>
-    );
-  }
-  if(typeof entry==="string" && entry) return <span style={{display:"block",fontSize:9,fontWeight:400,color:"#7E57C2"}}>↔ {entry}</span>;
-  return null;
+// Horaires standards de chaque poste (affichés quand le jour n'est pas aménagé)
+const STD_SHIFT_HOURS = { matin:"5h50–14h", am:"13h50–22h", nuit:"21h50–6h" };
+// Horaire à afficher pour un poste un jour donné : aménagé si défini, sinon standard
+function shiftHoursLabel(key, amenageEntry){
+  if(amenageEntry && typeof amenageEntry==="object" && amenageEntry[key])
+    return `${fmtClock(amenageEntry[key].s)}–${fmtClock(amenageEntry[key].e)}`;
+  return STD_SHIFT_HOURS[key];
+}
+// Note du créneau commun d'un jour aménagé (affichée dans l'en-tête du jour)
+function AmenageNote({entry}){
+  const note = entry && typeof entry==="object" ? (entry.commun||"") : (typeof entry==="string"?entry:"");
+  if(!note) return null;
+  return <span style={{display:"block",fontSize:9,fontWeight:600,color:"#7E57C2"}}>↔ {note}</span>;
 }
 
 // ── UTILITAIRES DATE ──────────────────────────────────────────────────────────
@@ -535,7 +534,7 @@ function PublicView() {
                           </span>
                           {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
                           {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}}>⇄ Aménagé</span>}
-                          {isAmenage&&!isChome&&<AmenageSummary entry={amenage}/>}
+                          {isAmenage&&!isChome&&<AmenageNote entry={amenage}/>}
                         </th>
                       ))}
                     </tr>
@@ -550,7 +549,14 @@ function PublicView() {
                       if(!opsIn.length)return null;
                       return(
                         <React.Fragment key={key}>
-                          <tr><td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc}}>{label}</td></tr>
+                          <tr>
+                            <td style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:700,color:tc,whiteSpace:"nowrap"}}>{label}</td>
+                            {days.map(({d,isChome,amenage})=>(
+                              <td key={d} style={{padding:"3px 6px",background:bg,fontSize:10,fontWeight:600,color:tc,textAlign:"center",whiteSpace:"nowrap",opacity:isChome?0.4:1}}>
+                                {shiftHoursLabel(key, amenage)}
+                              </td>
+                            ))}
+                          </tr>
                           {opsIn.map(short=>{
                             const op=(operators||[]).find(o=>o.short===short);
                             return(
@@ -1783,11 +1789,11 @@ function AdminApp(){
                     return{d,date,dateStr,isFerie,isSat,isChome,isAmenage,amenage:joursAmenages[amKey]};
                   });
 
-                  // Opérateurs groupés par poste
+                  // Opérateurs groupés par poste (libellé court : l'horaire s'affiche par jour)
                   const groups=[
-                    {key:"matin",label:"🌅 Matin 5h50–14h", bg:"#f0faf1",tc:"#1B5E20"},
-                    {key:"am",   label:"🌆 AM 13h50–22h",   bg:"#fffde7",tc:"#F57F17"},
-                    {key:"nuit", label:"🌙 Nuit 21h50–6h",  bg:"#e3f2fd",tc:"#0D47A1"},
+                    {key:"matin",label:"🌅 Matin", bg:"#D6EFD8",tc:"#1B5E20"},
+                    {key:"am",   label:"🌆 AM",    bg:"#FFF9C4",tc:"#F57F17"},
+                    {key:"nuit", label:"🌙 Nuit",  bg:"#BBDEFB",tc:"#0D47A1"},
                   ];
 
                   // Volants actifs
@@ -1846,7 +1852,7 @@ function AdminApp(){
                                 </span>
                                 {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
                                 {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}}>⇄ Aménagé</span>}
-                                {isAmenage&&!isChome&&<AmenageSummary entry={amenage}/>}
+                                {isAmenage&&!isChome&&<AmenageNote entry={amenage}/>}
                                 {!locked&&!isChome&&(
                                   <span style={{display:"block",fontSize:8,color:"#ccc",fontWeight:400}}>
                                     clic = chômer · <span onClick={e=>{e.stopPropagation();openAmenage(sc.s,dateStr,["Lun","Mar","Mer","Jeu","Ven","Sam"][d]);}} style={{color:"#7E57C2",cursor:"pointer",textDecoration:"underline"}}>{isAmenage?"modifier horaires":"aménager"}</span>
@@ -1863,7 +1869,12 @@ function AdminApp(){
                             return(
                               <React.Fragment key={key}>
                                 <tr>
-                                  <td colSpan={numDays+1} style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:600,color:tc,letterSpacing:.3}}>{label}</td>
+                                  <td style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:700,color:tc,letterSpacing:.3,whiteSpace:"nowrap"}}>{label}</td>
+                                  {days.map(({d,dateStr,isChome,amenage})=>(
+                                    <td key={d} style={{padding:"3px 6px",background:bg,fontSize:10,fontWeight:600,color:tc,textAlign:"center",whiteSpace:"nowrap",opacity:isChome?0.4:1}}>
+                                      {shiftHoursLabel(key, amenage)}
+                                    </td>
+                                  ))}
                                 </tr>
                                 {opsInShift.map(short=>{
                                   const op=operators.find(o=>o.short===short);
