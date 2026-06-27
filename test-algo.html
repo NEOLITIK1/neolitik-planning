@@ -658,6 +658,40 @@ section("20. Non-régression — équité identique quand tout le monde est pré
   assert(`52 sem effectif stable : écart nuits ≤ 3 (écart=${nuitSpread})`, nuitSpread<=3);
 }
 
+// ── 21. HEURES — nuit par poste & jours du mois (bissextiles) ───────────
+section("21. Heures — calcul nuit par poste & mois calendaire");
+{
+  const PAID=7, NW=[22,6];
+  const PRES={ matin:[5+50/60,14], am:[13+50/60,22], nuit:[21+50/60,24+6] };
+  const ov=(a,b,lo,hi)=>Math.max(0,Math.min(b,hi)-Math.max(a,lo));
+  const night=k=>{ const[s,e]=PRES[k],[ns,ne]=NW; return Math.min(ov(s,e,ns,ne+24)+ov(s,e,ns-24,ne),PAID); };
+  const dim=(y,m)=>new Date(y,m+1,0).getDate();
+
+  assert("Poste Nuit = 7h de nuit (plafonné aux heures payées)", Math.abs(night("nuit")-7)<1e-9, night("nuit"));
+  assert("Poste AM = 0h de nuit (finit à 22h pile)", Math.abs(night("am")-0)<1e-9, night("am"));
+  assert("Poste Matin = 10 min de nuit (5h50–6h)", Math.abs(night("matin")-10/60)<1e-9, night("matin"));
+
+  assert("Février 2024 (bissextile) = 29 jours", dim(2024,1)===29, dim(2024,1));
+  assert("Février 2026 (non bissextile) = 28 jours", dim(2026,1)===28, dim(2026,1));
+  assert("Février 2000 (bissextile séculaire) = 29 jours", dim(2000,1)===29, dim(2000,1));
+  assert("Février 2100 (non bissextile séculaire) = 28 jours", dim(2100,1)===28, dim(2100,1));
+  assert("Avril = 30 jours · Décembre = 31 jours", dim(2026,3)===30 && dim(2026,11)===31);
+}
+
+// ── 22. HEURES — 35h/semaine, samedi en heures sup ──────────────────────
+section("22. Heures — seuil hebdo 35h et heures sup");
+{
+  const PAID=7, BASE=35;
+  const wk5=5*PAID, wk6=6*PAID;
+  assert("Semaine Lun–Ven = 35h → 0 heure sup", wk5===35 && Math.max(0,wk5-BASE)===0, wk5);
+  assert("Semaine + samedi = 42h → 7 heures sup", wk6===42 && Math.max(0,wk6-BASE)===7, wk6);
+  // Répartition prorata d'une semaine à cheval (4 jours mois A, 1 jour mois B, samedi mois B)
+  const weekTotal=42, supWeek=Math.max(0,weekTotal-BASE); // 7
+  const inA=4*PAID, inB=2*PAID; // 28 + 14
+  const supA=supWeek*(inA/weekTotal), supB=supWeek*(inB/weekTotal);
+  assert("Heures sup réparties au prorata (4j/2j) ≈ 4,67 + 2,33", Math.abs(supA+supB-7)<1e-9 && Math.abs(supA-7*28/42)<1e-9);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // RÉSUMÉ
 // ════════════════════════════════════════════════════════════════════════

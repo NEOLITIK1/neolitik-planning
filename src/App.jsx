@@ -75,6 +75,35 @@ const SHIFT_META = [
   {key:"nuit",  label:"Nuit 21h50–6h",   bg:"#e3f2fd", hbg:"#BBDEFB", tc:"#0D47A1"},
 ];
 
+// ── PARAMÈTRES PAIE (calcul des heures) ──────────────────────────────────────
+// Réglages validés avec le dirigeant. À ajuster ici si la convention change.
+const PAID_HOURS_PER_SHIFT = 7;      // heures payées par poste (pause déduite)
+const NIGHT_WINDOW = [22, 6];        // heures de nuit : 22h → 6h
+const WEEKLY_BASE  = 35;             // seuil hebdomadaire des heures supplémentaires
+// Présence réelle de chaque poste (heures décimales, horloge continue : 6h = 30)
+const SHIFT_PRESENCE = {
+  matin: [5+50/60, 14],
+  am:    [13+50/60, 22],
+  nuit:  [21+50/60, 24+6],
+};
+const MONTHS_FR = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
+
+// Chevauchement (en heures) de l'intervalle [a,b] avec [lo,hi]
+function overlapHours(a,b,lo,hi){ return Math.max(0, Math.min(b,hi)-Math.max(a,lo)); }
+// Heures de nuit payées d'un poste = présence ∩ plage de nuit, plafonnée aux heures payées.
+function nightHoursForShift(key){
+  const p=SHIFT_PRESENCE[key]; if(!p) return 0;
+  const [s,e]=p, [ns,ne]=NIGHT_WINDOW;
+  // La plage de nuit traverse minuit : on la couvre en [ns, ne+24] et [ns-24, ne].
+  const night = overlapHours(s,e,ns,ne+24) + overlapHours(s,e,ns-24,ne);
+  return Math.min(night, PAID_HOURS_PER_SHIFT);
+}
+const NIGHT_HOURS = { matin:nightHoursForShift("matin"), am:nightHoursForShift("am"), nuit:nightHoursForShift("nuit") };
+// Jours d'un mois calendaire — gère février et années bissextiles via l'objet Date.
+function daysInMonth(year, month /*0-11*/){ return new Date(year, month+1, 0).getDate(); }
+// Heures décimales → "Hh MM" (ex. 7 → "7h00", 0,1667 → "0h10", 35,5 → "35h30")
+function fmtHours(h){ const m=Math.round(h*60); return `${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}`; }
+
 // ── UTILITAIRES DATE ──────────────────────────────────────────────────────────
 function getMondayOfWeek(w,year){
   const jan1=new Date(year,0,1),d=jan1.getDay()||7;
@@ -373,7 +402,7 @@ function PublicView() {
     </div>
   );
 
-  const {schedules, operators, satWeeks, satEndPostes, joursChomes, notes, publishedAt, year, publishView} = data;
+  const {schedules, operators, satWeeks, satEndPostes, joursChomes, joursAmenages, notes, publishedAt, year, publishView} = data;
   const SMETA = [
     {key:"matin",label:"🌅 Matin 5h50–14h", hbg:"#D6EFD8",tc:"#1B5E20"},
     {key:"am",   label:"🌆 AM 13h50–22h",   hbg:"#FFF9C4",tc:"#F57F17"},
@@ -447,7 +476,8 @@ function PublicView() {
             const date=new Date(m); date.setDate(m.getDate()+d);
             const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
             const isChome=!!((joursChomes||{})[`${sc.s}-${dateStr}`]);
-            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5,isChome};
+            const isAmenage=(joursAmenages||{})[`${sc.s}-${dateStr}`]!==undefined;
+            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5,isChome,isAmenage,amenageTxt:(joursAmenages||{})[`${sc.s}-${dateStr}`]||""};
           });
           const note=(notes||{})[sc.s];
           const end=new Date(m); end.setDate(m.getDate()+(numDays-1));
@@ -464,9 +494,10 @@ function PublicView() {
                   <thead>
                     <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
                       <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:150}}>Opérateur</th>
-                      {days.map(({d,dateStr,isFerie,isSat,isChome})=>(
+                      {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenageTxt})=>(
                         <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
                           color:isChome?"#aaa":isSat?"#e65100":"#666",minWidth:70,
+                          background:isAmenage&&!isChome?"#EDE7F6":"transparent",
                           opacity:isChome?0.5:1}}>
                           {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
                           <span style={{display:"block",fontSize:10,fontWeight:400}}>
@@ -474,6 +505,7 @@ function PublicView() {
                             {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
                           </span>
                           {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
+                          {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}} title={amenageTxt}>⇄ Aménagé</span>}
                         </th>
                       ))}
                     </tr>
@@ -590,8 +622,11 @@ function AdminApp(){
   const [satWeeks,setSatWeeks]       = useState([]);
   const [satEndPostes,setSatEndPostes] = useState({}); // { [semaine]: "M"|"AM"|"N" }
   const [joursChomes,setJoursChomes]   = useState({}); // { "semaine-dateStr": true } jour chômé = toute l'équipe absente
+  const [joursAmenages,setJoursAmenages] = useState({}); // { "semaine-dateStr": "créneau" } horaires aménagés (postes décalés/chevauchement) — info, heures inchangées
   const [notes,setNotes]             = useState({});
   const [year,setYear]           = useState(2026);
+  const [hoursMonth,setHoursMonth] = useState(()=>new Date().getMonth());   // 0-11, récap d'heures
+  const [hoursYear,setHoursYear]   = useState(()=>new Date().getFullYear());
   const [history,setHistory]     = useState([]);
   const [startWeek,setStartWeek] = useState(()=>getCurrentWeek(new Date().getFullYear()));
   const [numWeeks,setNumWeeks]   = useState(5);
@@ -628,13 +663,13 @@ function AdminApp(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,ar,sw,sep,jc,nt,hi,yr]=await Promise.all([
+        const [ops,abs,lv,ov,ar,sw,sep,jc,ja,nt,hi,yr]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),sbGet("archive"),
-          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("notes"),sbGet("history"),sbGet("year"),
+          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("joursamenages"),sbGet("notes"),sbGet("history"),sbGet("year"),
         ]);
         if(ops&&ops.length>0)setOperators(ops);
         if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov); if(ar)setArchive(ar);
-        if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep); if(jc)setJoursChomes(jc);
+        if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep); if(jc)setJoursChomes(jc); if(ja)setJoursAmenages(ja);
         if(nt)setNotes(nt); if(hi)setHistory(hi);
         if(yr)setYear(Number(yr));
         setSyncMsg("Synchronisé ✓");
@@ -657,6 +692,7 @@ function AdminApp(){
   const saveSatWeeks    = useCallback(v=>{setSatWeeks(v);    save("satweeks",v);},[save]);
   const saveSatEndPostes= useCallback(v=>{setSatEndPostes(v);save("satendpostes",v);},[save]);
   const saveJoursChomes = useCallback(v=>{setJoursChomes(v);save("jourschomes",v);},[save]);
+  const saveJoursAmenages=useCallback(v=>{setJoursAmenages(v);save("joursamenages",v);},[save]);
   const saveNotes       = useCallback(v=>{setNotes(v);       save("notes",v);},[save]);
   const saveYear        = useCallback(v=>{setYear(v);        save("year",String(v));},[save]);
 
@@ -950,6 +986,18 @@ function AdminApp(){
     saveJoursChomes(next);
   };
 
+  // Jour à horaires aménagés : les 3 postes se décalent pour se chevaucher sur un
+  // créneau (info équipe). Les affectations et les heures payées ne changent pas.
+  const toggleJourAmenage = (weekNum, dateStr) => {
+    if(isWeekLocked(weekNum)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    const key=`${weekNum}-${dateStr}`;
+    const next={...joursAmenages};
+    if(next[key]!==undefined){ delete next[key]; saveJoursAmenages(next); flash("Horaires aménagés retirés"); return; }
+    const txt=(window.prompt("Créneau de chevauchement (ex. « tous présents 10h–13h ») — optionnel :","")||"").trim();
+    next[key]=txt; saveJoursAmenages(next);
+    flash("Jour marqué « horaires aménagés »");
+  };
+
   const toggleAbsJour = (weekNum, opShort, dateStr, dayLabel) => {
     // Autorisé sur semaine écoulée : le planning archivé ne bouge pas,
     // mais l'absence réelle est tracée pour la paie.
@@ -979,6 +1027,7 @@ function AdminApp(){
       satWeeks,
       satEndPostes,
       joursChomes,
+      joursAmenages,
       notes,
       year,
       publishView,
@@ -1003,6 +1052,7 @@ function AdminApp(){
     {id:"conges",    label:"Congés",     icon:"🏖"},
     {id:"absences",  label:"Historique", icon:"📋"},
     {id:"equite",    label:"Équité",     icon:"📊"},
+    {id:"heures",    label:"Heures",     icon:"🕐"},
     {id:"timeline",  label:"Timeline",   icon:"📈"},
     {id:"equipe",    label:"Équipe",     icon:"👥"},
   ];
@@ -1122,6 +1172,118 @@ function AdminApp(){
     a.download=`neolitik-suivi-${year}-S1-S${allSchedules[allSchedules.length-1].s}.csv`;
     a.click(); URL.revokeObjectURL(url);
     flash("Export CSV généré — ouvrable dans Excel pour la paie");
+  };
+
+  // ── MOTEUR HEURES (récap mensuel paie) ────────────────────────────────────
+  // Reconstitue, jour par jour, les heures réellement effectuées par opérateur
+  // sur le mois calendaire choisi. Tient compte : poste de la semaine (planning
+  // ou archive figée), jours chômés, absences (semaine/jour), congés (complets/
+  // partiels), samedis travaillés. Un jour aménagé reste un jour posté normal (7h).
+  // Heures sup = au-delà de 35h sur la semaine complète ; pour une semaine à
+  // cheval sur deux mois, les HS sont réparties au prorata des heures du mois.
+  const computeMonthHours = (mYear, mMonth)=>{
+    const arc = archive[mYear]||{};
+    const {schedules:full} = buildSchedules(operators, 1, 53, absences, leaves, overrides, arc);
+    const byWeek={}; full.forEach(sc=>{ byWeek[sc.s]=sc; });
+
+    // Heures d'un opérateur un jour donné (offset 0=Lun … 5=Sam) ; null = ne travaille pas
+    const dayHours=(op, sc, offset, dateStr)=>{
+      if(!sc) return null;
+      let key=null;
+      if(sc.matin.includes(op.short)) key="matin";
+      else if(sc.am.includes(op.short)) key="am";
+      else if(sc.nuit.includes(op.short)) key="nuit";
+      if(!key) return null;                                       // pas affecté = repos
+      if(joursChomes[`${sc.s}-${dateStr}`]) return null;          // usine fermée ce jour
+      if(offset===5){                                              // samedi
+        if(!satWeeks.includes(sc.s)) return null;
+        const satEnd={M:0,AM:1,N:2}[satEndPostes[sc.s]||"N"];
+        if({matin:0,am:1,nuit:2}[key] > satEnd) return null;      // poste non travaillé ce samedi
+      }
+      const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][offset];
+      if((absences[sc.s]||[]).includes(`${op.short}|${sc.s}|${dayLabel}`)) return null; // absent ce jour
+      const partialLeave=(leaves[sc.s]||[]).some(e=>{
+        if(!e.startsWith(op.short+":")) return false;
+        const[,range]=e.split(":"); const[sd,ed]=range.split("-").map(Number);
+        return offset+1>=sd && offset+1<=ed;
+      });
+      if(partialLeave) return null;
+      return { total:PAID_HOURS_PER_SHIFT, night:NIGHT_HOURS[key] };
+    };
+
+    const res={};
+    operators.forEach(op=>{ res[op.short]={op, total:0, night:0, sup:0, days:0, sat:0}; });
+
+    // Semaines touchant le mois — pour chacune on calcule TOUS ses jours (Lun→Sam)
+    // afin de connaître le total hebdo (>35h), en marquant ceux du mois sélectionné.
+    const weeksTouched=new Set();
+    const lastDay=daysInMonth(mYear, mMonth);
+    for(let d=1; d<=lastDay; d++){
+      const date=new Date(mYear, mMonth, d);
+      for(let w=1; w<=53; w++){
+        const mon=getMondayOfWeek(w, mYear);
+        const diff=Math.floor((date-mon)/86400000);
+        if(diff>=0 && diff<=5){ weeksTouched.add(w); break; }
+      }
+    }
+
+    weeksTouched.forEach(w=>{
+      const sc=byWeek[w]; if(!sc) return;
+      const mon=getMondayOfWeek(w, mYear);
+      operators.forEach(op=>{
+        let weekTotal=0, inTotal=0, inNight=0, inDays=0, inSat=0;
+        for(let offset=0; offset<=5; offset++){
+          const date=new Date(mon); date.setDate(mon.getDate()+offset);
+          const h=dayHours(op, sc, offset, fmtDate(date));
+          if(!h) continue;
+          weekTotal+=h.total;
+          if(date.getFullYear()===mYear && date.getMonth()===mMonth){
+            inTotal+=h.total; inNight+=h.night; inDays++;
+            if(offset===5) inSat++;
+          }
+        }
+        if(inTotal===0) return;
+        const supWeek=Math.max(0, weekTotal-WEEKLY_BASE);
+        const supMonth=weekTotal>0 ? supWeek*(inTotal/weekTotal) : 0;
+        const r=res[op.short];
+        r.total+=inTotal; r.night+=inNight; r.sup+=supMonth; r.days+=inDays; r.sat+=inSat;
+      });
+    });
+
+    return operators
+      .map(op=>{ const r=res[op.short]; return {...r, normal:Math.max(0, r.total-r.sup)}; })
+      .filter(r=>r.total>0)
+      .sort((a,b)=> b.total-a.total);
+  };
+
+  const monthHours = React.useMemo(
+    ()=> tab==="heures" ? computeMonthHours(hoursYear, hoursMonth) : [],
+    [tab, hoursYear, hoursMonth, operators, absences, leaves, overrides, archive, satWeeks, satEndPostes, joursChomes]
+  );
+  const monthTotals = monthHours.reduce((a,r)=>({
+    total:a.total+r.total, night:a.night+r.night, sup:a.sup+r.sup, normal:a.normal+r.normal, days:a.days+r.days, sat:a.sat+r.sat,
+  }),{total:0,night:0,sup:0,normal:0,days:0,sat:0});
+
+  const exportHoursCSV = ()=>{
+    if(!monthHours.length){flash("Aucune heure sur ce mois","#c62828");return;}
+    const num=h=>h.toFixed(2).replace(".",",");
+    const lines=[["Mois","Operateur","Niveau","Jours travailles","dont Samedis","Heures effectuees","Heures normales","Heures de nuit","Heures sup"].join(";")];
+    monthHours.forEach(r=>lines.push([
+      `${MONTHS_FR[hoursMonth]} ${hoursYear}`, r.op.full, r.op.level, r.days, r.sat,
+      num(r.total), num(r.normal), num(r.night), num(r.sup),
+    ].join(";")));
+    lines.push(["","TOTAL","","","",num(monthTotals.total),num(monthTotals.normal),num(monthTotals.night),num(monthTotals.sup)].join(";"));
+    const blob=new Blob(["\ufeff"+lines.join("\r\n")],{type:"text/csv;charset=utf-8;"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url;
+    a.download=`neolitik-heures-${hoursYear}-${String(hoursMonth+1).padStart(2,"0")}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+    flash("Export heures généré — ouvrable dans Excel");
+  };
+  const shiftHoursMonth = delta=>{
+    let m=hoursMonth+delta, y=hoursYear;
+    if(m<0){m=11;y--;} else if(m>11){m=0;y++;}
+    setHoursMonth(m); setHoursYear(y);
   };
 
   // ── RENDER ────────────────────────────────────────────────────────────────
@@ -1472,6 +1634,9 @@ function AdminApp(){
             {/* VUE JOURS */}
             {view==="jours"&&(
               <div style={{overflowX:"auto"}}>
+                <div style={{fontSize:12,color:"#4527A0",marginBottom:10,background:"#EDE7F6",border:"1px solid #d1c4e9",borderRadius:7,padding:"8px 12px"}}>
+                  ⇄ <strong>Jour aménagé :</strong> dans l'en-tête d'un jour, cliquez « aménager » pour signaler un jour à horaires décalés (postes qui se chevauchent, ex. créneau commun). Les affectations et les heures payées ne changent pas — c'est une info pour l'équipe.
+                </div>
                 {schedules.map(sc=>{
                   const hasSat=satWeeks.includes(sc.s);
                   const m=getMondayOfWeek(sc.s,year);
@@ -1493,7 +1658,9 @@ function AdminApp(){
                     const isFerie=feriesDates.includes(dateStr);
                     const isSat=d===5;
                     const isChome=!!joursChomes[`${sc.s}-${dateStr}`];
-                    return{d,date,dateStr,isFerie,isSat,isChome};
+                    const amKey=`${sc.s}-${dateStr}`;
+                    const isAmenage=joursAmenages[amKey]!==undefined;
+                    return{d,date,dateStr,isFerie,isSat,isChome,isAmenage,amenageTxt:joursAmenages[amKey]||""};
                   });
 
                   // Opérateurs groupés par poste
@@ -1543,12 +1710,12 @@ function AdminApp(){
                               Opérateur
                               <span style={{display:"block",fontSize:9,color:"#bbb",fontWeight:400}}>clic cellule = absent ce jour</span>
                             </th>
-                            {days.map(({d,dateStr,isFerie,isSat,isChome})=>(
+                            {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenageTxt})=>(
                               <th key={d}
                                 onClick={()=>!locked&&toggleJourChome(sc.s,dateStr)}
                                 style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
                                   color:isChome?"#888":isSat?"#e65100":"#666",
-                                  background:isChome?"#f5f5f5":isSat?"#fff8f0":"transparent",
+                                  background:isChome?"#f5f5f5":isAmenage?"#EDE7F6":isSat?"#fff8f0":"transparent",
                                   minWidth:80,whiteSpace:"nowrap",
                                   cursor:locked?"default":"pointer",
                                   opacity:isChome?0.5:1}}>
@@ -1558,7 +1725,12 @@ function AdminApp(){
                                   {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
                                 </span>
                                 {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
-                                {!locked&&!isChome&&<span style={{display:"block",fontSize:8,color:"#ccc",fontWeight:400}}>clic = chômer</span>}
+                                {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}} title={amenageTxt}>⇄ Aménagé{amenageTxt?` (${amenageTxt})`:""}</span>}
+                                {!locked&&!isChome&&(
+                                  <span style={{display:"block",fontSize:8,color:"#ccc",fontWeight:400}}>
+                                    clic = chômer · <span onClick={e=>{e.stopPropagation();toggleJourAmenage(sc.s,dateStr);}} style={{color:"#7E57C2",cursor:"pointer",textDecoration:"underline"}}>{isAmenage?"normal":"aménager"}</span>
+                                  </span>
+                                )}
                               </th>
                             ))}
                           </tr>
@@ -1851,6 +2023,79 @@ function AdminApp(){
                   })}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {/* ══ HEURES ══ */}
+        {tab==="heures"&&(
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:10}}>
+              <div style={{fontWeight:600,fontSize:15}}>Récap mensuel des heures — paie</div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <button onClick={()=>shiftHoursMonth(-1)} style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:15,fontWeight:600}}>‹</button>
+                <span style={{fontWeight:600,fontSize:14,minWidth:150,textAlign:"center"}}>{MONTHS_FR[hoursMonth]} {hoursYear}</span>
+                <button onClick={()=>shiftHoursMonth(1)} style={{padding:"5px 12px",borderRadius:6,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:15,fontWeight:600}}>›</button>
+                <button onClick={exportHoursCSV} style={{padding:"6px 14px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>⬇ Export CSV</button>
+              </div>
+            </div>
+            <div style={{fontSize:12,color:"#888",marginBottom:14}}>
+              Mois calendaire du 1<sup>er</sup> au {daysInMonth(hoursYear,hoursMonth)} {MONTHS_FR[hoursMonth].toLowerCase()} {hoursYear}.
+              Base : {PAID_HOURS_PER_SHIFT}h payées par poste · nuit {NIGHT_WINDOW[0]}h–{NIGHT_WINDOW[1]}h · heures sup au-delà de {WEEKLY_BASE}h/semaine.
+            </div>
+
+            {monthHours.length===0
+              ? <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"24px",fontSize:13,color:"#999",textAlign:"center"}}>Aucune heure enregistrée sur ce mois.</div>
+              : <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:13,minWidth:680}}>
+                    <thead>
+                      <tr style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0"}}>
+                        <th style={{padding:"10px 14px",textAlign:"left"}}>Opérateur</th>
+                        <th style={{padding:"10px 10px",textAlign:"left"}}>Niv.</th>
+                        <th style={{padding:"10px 10px",textAlign:"center"}}>Jours</th>
+                        <th style={{padding:"10px 10px",textAlign:"center"}}>Effectuées</th>
+                        <th style={{padding:"10px 10px",textAlign:"center"}}>Normales</th>
+                        <th style={{padding:"10px 10px",textAlign:"center",color:"#0D47A1"}}>Nuit</th>
+                        <th style={{padding:"10px 10px",textAlign:"center",color:"#e65100"}}>Heures sup</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monthHours.map((r,i)=>(
+                        <tr key={r.op.id||r.op.short} style={{borderBottom:"1px solid #f0f0f0",background:i%2===0?"#fff":"#fafafa"}}>
+                          <td style={{padding:"9px 14px",fontWeight:500}}>{r.op.full}</td>
+                          <td style={{padding:"9px 10px"}}><LevelBadge level={r.op.level}/></td>
+                          <td style={{padding:"9px 10px",textAlign:"center"}}>
+                            {r.days}
+                            {r.sat>0&&<span style={{fontSize:10,color:"#e65100",display:"block"}}>dont {r.sat} sam.</span>}
+                          </td>
+                          <td style={{padding:"9px 10px",textAlign:"center",fontWeight:700}}>{fmtHours(r.total)}</td>
+                          <td style={{padding:"9px 10px",textAlign:"center"}}>{fmtHours(r.normal)}</td>
+                          <td style={{padding:"9px 10px",textAlign:"center",color:"#0D47A1",fontWeight:r.night>0?600:400}}>{r.night>0?fmtHours(r.night):"—"}</td>
+                          <td style={{padding:"9px 10px",textAlign:"center",color:"#e65100",fontWeight:r.sup>0?700:400}}>{r.sup>0?fmtHours(r.sup):"—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr style={{borderTop:"2px solid #e0e0e0",background:"#f1f8e9",fontWeight:700}}>
+                        <td style={{padding:"10px 14px"}} colSpan={2}>TOTAL équipe</td>
+                        <td style={{padding:"10px 10px",textAlign:"center"}}>{monthTotals.days}</td>
+                        <td style={{padding:"10px 10px",textAlign:"center"}}>{fmtHours(monthTotals.total)}</td>
+                        <td style={{padding:"10px 10px",textAlign:"center"}}>{fmtHours(monthTotals.normal)}</td>
+                        <td style={{padding:"10px 10px",textAlign:"center",color:"#0D47A1"}}>{fmtHours(monthTotals.night)}</td>
+                        <td style={{padding:"10px 10px",textAlign:"center",color:"#e65100"}}>{monthTotals.sup>0?fmtHours(monthTotals.sup):"—"}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+            }
+
+            <div style={{fontSize:12,color:"#666",marginTop:12,background:"#f0f4ff",border:"1px solid #c5cae9",borderRadius:7,padding:"10px 14px",lineHeight:1.6}}>
+              <strong>Lecture des colonnes :</strong><br/>
+              • <strong>Effectuées</strong> = total des heures travaillées ({PAID_HOURS_PER_SHIFT}h par jour posté).<br/>
+              • <strong>Normales</strong> = Effectuées − Heures sup.<br/>
+              • <strong>Nuit</strong> = heures entre {NIGHT_WINDOW[0]}h et {NIGHT_WINDOW[1]}h — <em>incluses</em> dans les Effectuées (c'est une majoration, pas un ajout). Poste Nuit ≈ {fmtHours(NIGHT_HOURS.nuit)} de nuit, AM {fmtHours(NIGHT_HOURS.am)}, Matin {fmtHours(NIGHT_HOURS.matin)}.<br/>
+              • <strong>Heures sup</strong> = au-delà de {WEEKLY_BASE}h sur la semaine ; une semaine à cheval sur deux mois est répartie au prorata des jours.<br/>
+              <span style={{color:"#888"}}>Note : un jour férié travaillé est compté comme normal (l'usine tourne 24/7). S'il n'est pas travaillé, marquez-le « chômé » dans la vue Jours. Les majorations de dimanche/férié ne sont pas calculées automatiquement.</span>
             </div>
           </div>
         )}
