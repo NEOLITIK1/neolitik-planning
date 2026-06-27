@@ -648,14 +648,17 @@ section("19. Départ en cours d'année — toWeek");
   assert("Toujours 3 en nuit malgré le départ (7 ops restants)", allNuit3);
 }
 
-// ── 20. ÉQUITÉ INCHANGÉE pour effectif stable (non-régression) ───────
-section("20. Non-régression — équité identique quand tout le monde est présent S1-S52");
+// ── 20. ÉQUITÉ effectif stable — répartition PAR RÔLE (non-régression) ──
+section("20. Non-régression — équité par rôle sur 52 semaines (effectif stable)");
 {
-  const {nightCount, matCount, amCount} = buildSchedules(OPS_8, 1, 52, {}, {}, {});
-  const active = OPS_8.filter(o=>o.active&&!o.isVolant);
-  const nuits = active.map(o=>nightCount[o.short]);
-  const nuitSpread = Math.max(...nuits)-Math.min(...nuits);
-  assert(`52 sem effectif stable : écart nuits ≤ 3 (écart=${nuitSpread})`, nuitSpread<=3);
+  const {nightCount} = buildSchedules(OPS_8, 1, 52, {}, {}, {});
+  const n4   = OPS_8.filter(o=>o.level==="N4").map(o=>nightCount[o.short]);
+  const non4 = OPS_8.filter(o=>o.level!=="N4").map(o=>nightCount[o.short]);
+  const spread = a=>Math.max(...a)-Math.min(...a);
+  // Au sein d'un même rôle, la charge de nuit doit rester serrée.
+  // L'écart N4↔non-N4 est STRUCTUREL (la nuit = 1 N4 + 2 non-N4), pas une inéquité.
+  assert(`Nuits équilibrées entre les 3 N4 (écart=${spread(n4)})`, spread(n4)<=2);
+  assert(`Nuits équilibrées entre les 5 non-N4 (écart=${spread(non4)})`, spread(non4)<=2);
 }
 
 // ── 21. HEURES — nuit par poste & jours du mois (bissextiles) ───────────
