@@ -1796,8 +1796,10 @@ function AdminApp(){
                     {key:"nuit", label:"🌙 Nuit",  bg:"#BBDEFB",tc:"#0D47A1"},
                   ];
 
-                  // Volants actifs
+                  // Volants actifs ; en "Journée" on n'affiche que ceux NON affectés
+                  // à un poste cette semaine (sinon doublon avec Matin/AM/Nuit).
                   const volantsList=operators.filter(o=>o.active&&o.isVolant);
+                  const volantsJournee=volantsList.filter(o=>![...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(o.short));
 
                   return(
                     <div key={sc.s} style={{background:"#fff",borderRadius:10,border:`1px solid ${hasAlert?"#ef9a9a":isCurrent?BRAND:"#e0e0e0"}`,marginBottom:16,overflow:"hidden"}}>
@@ -1913,29 +1915,24 @@ function AdminApp(){
                             );
                           })}
 
-                          {/* Volants */}
-                          {volantsList.length>0&&(
+                          {/* Volants en journée — uniquement ceux NON affectés à un poste cette semaine */}
+                          {volantsJournee.length>0&&(
                             <>
                               <tr>
                                 <td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0",letterSpacing:.3}}>☀️ Journée</td>
                               </tr>
-                              {volantsList.map(op=>{
+                              {volantsJournee.map(op=>{
                                 const lv=LEVEL_BADGE[op.level||"N1"];
-                                const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
                                 return(
                                   <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
                                     <td style={{padding:"5px 10px",whiteSpace:"nowrap"}}>
                                       <span style={{fontWeight:500}}>{showFullNames?op.full:op.short}</span>
                                       <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op.level}</span>
-                                      {inPlanning&&<span style={{background:"#e8f5e9",color:"#2e7d32",borderRadius:3,padding:"1px 4px",fontSize:9,marginLeft:3}}>planning</span>}
                                     </td>
                                     {days.map(({d,isSat,isChome,dateStr})=>{
                                       const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
                                       const absKey=`${op.short}|${sc.s}|${dayLabel}`;
                                       const isAbsent=(absences[sc.s]||[]).includes(absKey);
-                                      if(inPlanning){
-                                        return <td key={d} style={{padding:"4px 6px",textAlign:"center"}}><span style={{color:"#bbb",fontSize:11}}>—</span></td>;
-                                      }
                                       return(
                                         <td key={d}
                                           onClick={()=>!isChome&&toggleAbsJour(sc.s,op.short,dateStr,dayLabel)}
