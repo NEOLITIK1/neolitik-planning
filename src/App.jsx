@@ -431,6 +431,12 @@ function PublicView() {
   );
 
   const {schedules, operators, satWeeks, satEndPostes, joursChomes, joursAmenages, notes, publishedAt, year, publishView} = data;
+  const absences = data.absences||{};
+  const leaves   = data.leaves||{};
+  // Absent ce jour précis ? (absence ponctuelle "short|sem|jour")
+  const isDayAbsent = (short, week, dayLabel)=> (absences[week]||[]).includes(`${short}|${week}|${dayLabel}`);
+  // Hors planning toute la semaine ? (absence ou congé semaine complète)
+  const isFullOut   = (short, week)=> (absences[week]||[]).includes(short) || (leaves[week]||[]).includes(short);
   const SMETA = [
     {key:"matin",label:"🌅 Matin 5h50–14h", hbg:"#D6EFD8",tc:"#1B5E20"},
     {key:"am",   label:"🌆 AM 13h50–22h",   hbg:"#FFF9C4",tc:"#F57F17"},
@@ -564,11 +570,15 @@ function PublicView() {
                                 <td style={{padding:"5px 10px",fontWeight:500}}>{op?.full||short}</td>
                                 {days.map(({d,isSat,isChome})=>{
                                   const isOff=isSat&&shiftIdx[key]>satEndIdx;
+                                  const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
+                                  const absent=isDayAbsent(short, sc.s, dayLabel);
+                                  const off=isOff||isChome||absent;
                                   return(
                                     <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent"}}>
-                                      <span style={{background:isOff||isChome?"#f5f5f5":bg,color:isOff||isChome?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                        {isOff||isChome?"—":key==="matin"?"M":key==="am"?"AM":"N"}
+                                      <span style={{background:off?"#f5f5f5":bg,color:off?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                        {off?"—":key==="matin"?"M":key==="am"?"AM":"N"}
                                       </span>
+                                      {absent&&!isChome&&!isOff&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
                                     </td>
                                   );
                                 })}
@@ -578,22 +588,28 @@ function PublicView() {
                         </React.Fragment>
                       );
                     })}
-                    {/* Volants en journée */}
+                    {/* Volants en journée — exclus s'ils sont dans un poste ou absents/congé toute la semaine */}
                     {(operators||[]).filter(o=>o.isVolant&&o.active).map(op=>{
                       const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
-                      if(inPlanning)return null;
+                      if(inPlanning || isFullOut(op.short, sc.s))return null;
                       return(
                         <React.Fragment key={op.short}>
                           <tr><td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0"}}>☀️ Journée</td></tr>
                           <tr style={{borderBottom:"0.5px solid #f5f5f5"}}>
                             <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
-                            {days.map(({d,isChome})=>(
-                              <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":"transparent"}}>
-                                <span style={{background:isChome?"#f5f5f5":"#EDE7F6",color:isChome?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                  {isChome?"—":"J"}
-                                </span>
-                              </td>
-                            ))}
+                            {days.map(({d,isChome})=>{
+                              const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
+                              const absent=isDayAbsent(op.short, sc.s, dayLabel);
+                              const off=isChome||absent;
+                              return(
+                                <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":"transparent"}}>
+                                  <span style={{background:off?"#f5f5f5":"#EDE7F6",color:off?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
+                                    {off?"—":"J"}
+                                  </span>
+                                  {absent&&!isChome&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
+                                </td>
+                              );
+                            })}
                           </tr>
                         </React.Fragment>
                       );
@@ -1102,6 +1118,8 @@ function AdminApp(){
     const snapshot = {
       schedules: toPublish,
       operators: operators.filter(o=>o.active),
+      absences,
+      leaves,
       satWeeks,
       satEndPostes,
       joursChomes,
@@ -1797,9 +1815,11 @@ function AdminApp(){
                   ];
 
                   // Volants actifs ; en "Journée" on n'affiche que ceux NON affectés
-                  // à un poste cette semaine (sinon doublon avec Matin/AM/Nuit).
+                  // à un poste cette semaine (sinon doublon) ET non absents/congé
+                  // toute la semaine (sinon ils restent dans le planning à tort).
                   const volantsList=operators.filter(o=>o.active&&o.isVolant);
-                  const volantsJournee=volantsList.filter(o=>![...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(o.short));
+                  const volantFullOut=o=>(absences[sc.s]||[]).includes(o.short)||(leaves[sc.s]||[]).includes(o.short);
+                  const volantsJournee=volantsList.filter(o=>![...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(o.short)&&!volantFullOut(o));
 
                   return(
                     <div key={sc.s} style={{background:"#fff",borderRadius:10,border:`1px solid ${hasAlert?"#ef9a9a":isCurrent?BRAND:"#e0e0e0"}`,marginBottom:16,overflow:"hidden"}}>
