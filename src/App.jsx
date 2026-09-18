@@ -1,4 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { buildSchedules, isLeader, normalizeOperators, linkOperators, moveAssignment, inWindow, applyDailyPlanning, daySlots, proposeDay, validateSchedule, absentOnDay, dailyRestIssues, SHIFTS } from "./scheduler.js";
+import { PAID_HOURS_PER_SHIFT, NIGHT_WINDOW, WEEKLY_BASE, MONTHS_FR, NIGHT_HOURS, fmtHours, nightHoursForWindow, computeMonthHours, daysInMonth } from "./payroll.js";
+import { getMondayOfWeek, fmtDate, formatWeekDates, getCurrentWeek, weeksInYear, isoWeek, isoDate, dateOfDay } from "./dates.js";
+import { ANNUAL_KEYS, emptyYear, migrateYears, yearData, setYearValue, migrateEmployment, operatorsInYear, mergeYearOperatorEdits } from "./yearData.js";
+import { DailyPlanning, DayEditor, WeeklyLocks, DailyChanges } from "./PlanningControls.jsx";
+import { stableSerialize } from "./state.js";
+import { buildSchedules as legacyBuildSchedules } from "./legacyScheduler.js";
 
 // ── TOKENS D'ACCÈS ───────────────────────────────────────────────────────────
 // Le token admin n'apparaît plus en clair dans le code : seul son empreinte
@@ -23,28 +30,41 @@ const SB_URL = "https://kgnpfwfuqwltxyrqfejk.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtnbnBmd2Z1cXdsdHh5cnFmZWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyODExODMsImV4cCI6MjA5NDg1NzE4M30.1-y6H9mB65WdJPSGrn70m0Z4kgzDDdt2hnwD04QRqio";
 const sbH = { "Content-Type":"application/json","apikey":SB_KEY,"Authorization":`Bearer ${SB_KEY}` };
 
+let writeQueue = Promise.resolve();
+function queueWrite(task) {
+  const operation = writeQueue.catch(()=>{}).then(task);
+  writeQueue = operation;
+  return operation;
+}
+async function checkedFetch(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`Sauvegarde/lecture refusée (HTTP ${response.status})`);
+  return response;
+}
 async function sbGet(key) {
-  const r = await fetch(`${SB_URL}/rest/v1/neolitik_config?key=eq.${key}&select=data`,{headers:sbH});
+  const r = await checkedFetch(`${SB_URL}/rest/v1/neolitik_config?key=eq.${key}&select=data`,{headers:sbH});
   const d = await r.json(); return d?.[0]?.data ?? null;
 }
-async function sbSet(key,data) {
-  await fetch(`${SB_URL}/rest/v1/neolitik_config`,{
+function sbSet(key,data) {
+  return queueWrite(async()=>{ await checkedFetch(`${SB_URL}/rest/v1/neolitik_config`,{
     method:"POST", headers:{...sbH,"Prefer":"resolution=merge-duplicates"},
     body:JSON.stringify({key,data}),
-  });
+  }); });
 }
 async function sbGetOps() {
-  const r = await fetch(`${SB_URL}/rest/v1/neolitik_operators?select=id,data`,{headers:sbH});
+  const r = await checkedFetch(`${SB_URL}/rest/v1/neolitik_operators?select=id,data`,{headers:sbH});
   const d = await r.json(); return d?.map(row=>({id:row.id,...row.data}))??null;
 }
-async function sbSetOps(ops) {
+function sbSetOps(ops) {
+  return queueWrite(async()=>{
   const rows = ops.map(({id,...rest})=>({id,data:rest}));
-  await fetch(`${SB_URL}/rest/v1/neolitik_operators`,{
+  await checkedFetch(`${SB_URL}/rest/v1/neolitik_operators`,{
     method:"POST", headers:{...sbH,"Prefer":"resolution=merge-duplicates"},
     body:JSON.stringify(rows),
   });
   const ids = ops.map(o=>o.id).join(",");
-  if(ids) await fetch(`${SB_URL}/rest/v1/neolitik_operators?id=not.in.(${ids})`,{method:"DELETE",headers:sbH});
+  if(ids) await checkedFetch(`${SB_URL}/rest/v1/neolitik_operators?id=not.in.(${ids})`,{method:"DELETE",headers:sbH});
+  });
 }
 
 // ── CONSTANTES ────────────────────────────────────────────────────────────────
@@ -75,47 +95,11 @@ const SHIFT_META = [
   {key:"nuit",  label:"Nuit 21h50–6h",   bg:"#e3f2fd", hbg:"#BBDEFB", tc:"#0D47A1"},
 ];
 
-// ── PARAMÈTRES PAIE (calcul des heures) ──────────────────────────────────────
-// Réglages validés avec le dirigeant. À ajuster ici si la convention change.
-const PAID_HOURS_PER_SHIFT = 7;      // heures payées par poste (pause déduite)
-const NIGHT_WINDOW = [22, 6];        // heures de nuit : 22h → 6h
-const WEEKLY_BASE  = 35;             // seuil hebdomadaire des heures supplémentaires
-// Présence réelle de chaque poste (heures décimales, horloge continue : 6h = 30)
-const SHIFT_PRESENCE = {
-  matin: [5+50/60, 14],
-  am:    [13+50/60, 22],
-  nuit:  [21+50/60, 24+6],
-};
-const MONTHS_FR = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
-
-// Chevauchement (en heures) de l'intervalle [a,b] avec [lo,hi]
-function overlapHours(a,b,lo,hi){ return Math.max(0, Math.min(b,hi)-Math.max(a,lo)); }
-// Heures de nuit payées d'un poste = présence ∩ plage de nuit, plafonnée aux heures payées.
-function nightHoursForShift(key){
-  const p=SHIFT_PRESENCE[key]; if(!p) return 0;
-  const [s,e]=p, [ns,ne]=NIGHT_WINDOW;
-  // La plage de nuit traverse minuit : on la couvre en [ns, ne+24] et [ns-24, ne].
-  const night = overlapHours(s,e,ns,ne+24) + overlapHours(s,e,ns-24,ne);
-  return Math.min(night, PAID_HOURS_PER_SHIFT);
-}
-const NIGHT_HOURS = { matin:nightHoursForShift("matin"), am:nightHoursForShift("am"), nuit:nightHoursForShift("nuit") };
-// Jours d'un mois calendaire — gère février et années bissextiles via l'objet Date.
-function daysInMonth(year, month /*0-11*/){ return new Date(year, month+1, 0).getDate(); }
-// Heures décimales → "Hh MM" (ex. 7 → "7h00", 0,1667 → "0h10", 35,5 → "35h30")
-function fmtHours(h){ const m=Math.round(h*60); return `${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}`; }
-
 // ── JOURS À HORAIRES AMÉNAGÉS ────────────────────────────────────────────────
 // Ce jour-là, les 3 équipes décalent leurs horaires pour se chevaucher.
 // Affectations + total payé (7h) inchangés ; seules les heures de NUIT sont
 // recalculées d'après les horaires saisis. Stocké : { matin:{s,e}, am, nuit, commun }.
 const AMENAGE_DEFAULT = { matin:{s:"05:50",e:"14:00"}, am:{s:"13:50",e:"22:00"}, nuit:{s:"21:50",e:"06:00"}, commun:"" };
-function hhmmToDec(str){ const [h,m]=String(str||"0:0").split(":").map(Number); return (h||0)+(m||0)/60; }
-function nightHoursForWindow(sStr,eStr){
-  let s=hhmmToDec(sStr), e=hhmmToDec(eStr);
-  if(e<=s) e+=24; // créneau qui traverse minuit
-  const [ns,ne]=NIGHT_WINDOW;
-  return Math.min(overlapHours(s,e,ns,ne+24)+overlapHours(s,e,ns-24,ne), PAID_HOURS_PER_SHIFT);
-}
 function fmtClock(str){ const [h,m]=String(str||"0:0").split(":").map(Number); return `${h}h${m?String(m).padStart(2,"0"):""}`; }
 // Horaires standards de chaque poste (affichés quand le jour n'est pas aménagé)
 const STD_SHIFT_HOURS = { matin:"5h50–14h", am:"13h50–22h", nuit:"21h50–6h" };
@@ -133,223 +117,7 @@ function AmenageNote({entry}){
 }
 
 // ── UTILITAIRES DATE ──────────────────────────────────────────────────────────
-function getMondayOfWeek(w,year){
-  const jan1=new Date(year,0,1),d=jan1.getDay()||7;
-  const mon=new Date(year,0,d<=4?2-d:9-d);
-  mon.setDate(mon.getDate()+(w-1)*7); return mon;
-}
-function fmtDate(d){return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`;}
-function formatWeekDates(w,year){
-  const m=getMondayOfWeek(w,year),s=new Date(m); s.setDate(m.getDate()+4);
-  return `${fmtDate(m)} – ${fmtDate(s)}`;
-}
-function getCurrentWeek(year){
-  const now=new Date(),jan1=new Date(year,0,1),d=jan1.getDay()||7;
-  const firstMon=new Date(year,0,d<=4?2-d:9-d);
-  const diff=Math.floor((now-firstMon)/86400000);
-  return diff<0?1:Math.floor(diff/7)+1;
-}
-
-// ── ALGORITHME DYNAMIQUE ──────────────────────────────────────────────────────
-// Contraintes absolues : 1 N4/poste, 3 en nuit, jamais 2 nuits consécutives
-// Contraintes souples : éviter 2 Matin ou 2 AM consécutifs (priorité absolue + swap AM/Matin)
-// Rotation Nuit → AM → Matin
-// archive : semaines écoulées figées (réalité travaillée) — priorité absolue,
-// jamais recalculées même si l'effectif change ensuite (fiabilité paie/suivi).
-// fromWeek/toWeek par opérateur : fenêtre de présence (arrivées/départs en cours d'année).
-// L'équité est proportionnelle aux semaines de présence : un nouvel arrivant
-// n'est pas surchargé pour "rattraper" les compteurs des anciens.
-function buildSchedules(operators, startWeek, numWeeks, absences, leaves, overrides, archive={}) {
-  const active    = operators.filter(o=>o.active);
-  // Les volants (N4 ajoutés manuellement) sont exclus du calcul automatique
-  // Ils apparaissent uniquement via glissement manuel (réserve)
-  const activeN4  = active.filter(o=>o.level==="N4" && !o.isVolant);
-  const activeNon4= active.filter(o=>o.level!=="N4" && !o.isVolant);
-
-  const nightCount= Object.fromEntries(active.map(o=>[o.short,0]));
-  const matCount  = Object.fromEntries(active.map(o=>[o.short,0]));
-  const amCount   = Object.fromEntries(active.map(o=>[o.short,0]));
-  const presentCount = Object.fromEntries(active.map(o=>[o.short,0]));
-
-  const inWindow = (o,s)=>(!o.fromWeek||s>=o.fromWeek)&&(!o.toWeek||s<=o.toWeek);
-
-  let prevNuit  = [];
-  let prevMatin = [];
-  let prevAm    = [];
-  const schedules = [];
-
-  for(let i=0;i<numWeeks;i++){
-    const s = startWeek+i;
-
-    active.forEach(o=>{ if(inWindow(o,s)) presentCount[o.short]++; });
-
-    // Semaine archivée (écoulée) : la réalité travaillée prime sur tout
-    if(archive[s]){
-      const ar = archive[s];
-      const arMatin=ar.matin||[], arAm=ar.am||[], arNuit=ar.nuit||[];
-      schedules.push({s, matin:arMatin, am:arAm, nuit:arNuit, alerts:[], isOverridden:false, isArchived:true});
-      arMatin.forEach(o=>{if(matCount[o]!==undefined)matCount[o]++;});
-      arAm.forEach(o=>{if(amCount[o]!==undefined)amCount[o]++;});
-      arNuit.forEach(o=>{if(nightCount[o]!==undefined)nightCount[o]++;});
-      prevNuit  = arNuit;
-      prevMatin = arMatin;
-      prevAm    = arAm;
-      continue;
-    }
-
-    // Override manuel pour cette semaine ?
-    if(overrides[s]){
-      const ov = overrides[s];
-      // Normalisation : on ne garde que les shorts (sécurité si nom complet stocké par erreur)
-      const toShort = name => {
-        const found = operators.find(o=>o.short===name||o.full===name);
-        return found ? found.short : name;
-      };
-      const ovMatin = (ov.matin||[]).map(toShort);
-      const ovAm    = (ov.am||[]).map(toShort);
-      const ovNuit  = (ov.nuit||[]).map(toShort);
-      // Validation des contraintes sur l'override (violations silencieuses)
-      const ovAlerts = [];
-      if(!ovNuit.some(n=>operators.find(o=>o.short===n&&o.level==="N4")))
-        ovAlerts.push(`⛔ S${s} : override — aucun N4 en nuit`);
-      if(!ovAm.some(n=>operators.find(o=>o.short===n&&o.level==="N4")))
-        ovAlerts.push(`⛔ S${s} : override — aucun N4 en AM`);
-      if(!ovMatin.some(n=>operators.find(o=>o.short===n&&o.level==="N4")))
-        ovAlerts.push(`⛔ S${s} : override — aucun N4 en Matin`);
-      if(ovNuit.length!==3)
-        ovAlerts.push(`⛔ S${s} : override — nuit ${ovNuit.length}/3`);
-      const consNuit=ovNuit.filter(n=>prevNuit.includes(n));
-      if(consNuit.length>0)
-        ovAlerts.push(`⚠ S${s} : override — nuit consécutive : ${consNuit.join(", ")}`);
-      schedules.push({s, matin:ovMatin, am:ovAm, nuit:ovNuit, alerts:ovAlerts, isOverridden:true});
-      ovMatin.forEach(o=>{if(matCount[o]!==undefined)matCount[o]++;});
-      ovAm.forEach(o=>{if(amCount[o]!==undefined)amCount[o]++;});
-      ovNuit.forEach(o=>{if(nightCount[o]!==undefined)nightCount[o]++;});
-      prevNuit  = ovNuit;
-      prevMatin = ovMatin;
-      prevAm    = ovAm;
-      continue;
-    }
-
-    // Absences de la semaine (complètes uniquement pour le remplacement)
-    const absWeekFull = [
-      ...(absences[s]||[]).filter(e=>!e.includes("|")),
-      ...(leaves[s]||[]).filter(e=>!e.includes(":")),
-    ];
-    const absWeekPartial = (absences[s]||[]).filter(e=>e.includes("|"));
-    const alerts = [];
-
-    // ── NUIT ──
-    // Disponibles : présents cette semaine, pas en nuit S-1, pas absents
-    const availN4nuit  = activeN4.filter(o=>inWindow(o,s)&&!prevNuit.includes(o.short)&&!absWeekFull.includes(o.short));
-    const availNon4nuit= activeNon4.filter(o=>inWindow(o,s)&&!prevNuit.includes(o.short)&&!absWeekFull.includes(o.short));
-
-    // Équité proportionnelle : taux = compteur / semaines de présence
-    const rate = (cnt,o)=> cnt[o.short]/Math.max(presentCount[o.short],1);
-
-    // Tri : taux de nuits le plus bas d'abord, départage : plus d'AM (rééquilibrage)
-    const sortNuit = (a,b)=> rate(nightCount,a)!==rate(nightCount,b)
-      ? rate(nightCount,a)-rate(nightCount,b)
-      : rate(amCount,b)-rate(amCount,a);
-
-    availN4nuit.sort(sortNuit);
-    availNon4nuit.sort(sortNuit);
-
-    let n4Nuit = availN4nuit[0];
-
-    // Fallback si aucun N4 dispo pour la nuit : prendre le moins chargé même s'il était en nuit
-    if(!n4Nuit){
-      alerts.push(`⛔ S${s} : aucun N4 disponible en nuit — contrainte non satisfaite, glissement manuel requis`);
-      const fallback = activeN4.filter(o=>inWindow(o,s)&&!absWeekFull.includes(o.short));
-      fallback.sort(sortNuit);
-      n4Nuit = fallback[0];
-    }
-
-    const non4Nuit = availNon4nuit.slice(0,2);
-    if(non4Nuit.length<2)
-      alerts.push(`⛔ S${s} : effectif nuit insuffisant (${non4Nuit.length+1}/3) — glissement manuel requis`);
-
-    const nuit = [n4Nuit?.short,...non4Nuit.map(o=>o.short)].filter(Boolean);
-
-    // ── MATIN & AM ──
-    const restN4   = activeN4.filter(o=>inWindow(o,s)&&!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
-    const restNon4 = activeNon4.filter(o=>inWindow(o,s)&&!nuit.includes(o.short)&&!absWeekFull.includes(o.short));
-
-    // Tri : 1) anti-consécutif (priorité absolue), 2) équité proportionnelle, 3) départage nuits
-    const sortMat = (a,b)=>{
-      const ac=prevMatin.includes(a.short)?1:0, bc=prevMatin.includes(b.short)?1:0;
-      if(ac!==bc) return ac-bc; // jamais deux Matins de suite si on peut l'éviter
-      if(rate(matCount,a)!==rate(matCount,b)) return rate(matCount,a)-rate(matCount,b);
-      return rate(nightCount,b)-rate(nightCount,a);
-    };
-    const sortAm = (a,b)=>{
-      const ac=prevAm.includes(a.short)?1:0, bc=prevAm.includes(b.short)?1:0;
-      if(ac!==bc) return ac-bc; // jamais deux AM de suite si on peut l'éviter
-      if(rate(amCount,a)!==rate(amCount,b)) return rate(amCount,a)-rate(amCount,b);
-      return rate(nightCount,b)-rate(nightCount,a);
-    };
-
-    // N4 pour AM (premier tri par équité + anti-consécutif)
-    const restN4ForAm = [...restN4].sort(sortAm);
-    let n4Am = restN4ForAm[0];
-
-    // N4 pour Matin (parmi les restants après AM)
-    let n4Matin = restN4.filter(o=>o.short!==n4Am?.short).sort(sortMat)[0];
-
-    // ── Optimisation d'assignation AM/Matin ──────────────────────────────────
-    // Problème : avec 3 N4, la sélection séquentielle (AM d'abord) peut laisser
-    // systématiquement le même N4 en Matin par élimination.
-    // Solution : après sélection initiale, tester si échanger AM/Matin réduit
-    // le nombre d'enchaînements consécutifs (score plus bas = meilleur).
-    if(n4Am && n4Matin) {
-      const scoreCur = (prevAm.includes(n4Am.short)?10:0) + (prevMatin.includes(n4Matin.short)?10:0);
-      const scoreSwp = (prevAm.includes(n4Matin.short)?10:0) + (prevMatin.includes(n4Am.short)?10:0);
-      if(scoreSwp < scoreCur){ const t=n4Am; n4Am=n4Matin; n4Matin=t; }
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
-    // Non-N4 pour AM : distribués équitablement entre AM et Matin
-    // Avec 5 non-N4 restants=3 → AM:1 Matin:2 ; avec 6 non-N4 restants=4 → AM:2 Matin:2
-    const restNon4ForAm = [...restNon4].sort(sortAm);
-    const amNon4Count = Math.max(1, Math.floor(restNon4.length / 2));
-    const non4AmList = restNon4ForAm.slice(0, amNon4Count);
-
-    const am = [n4Am?.short, ...non4AmList.map(o=>o.short)].filter(Boolean);
-    const non4Matin = restNon4
-      .filter(o=>!non4AmList.some(a=>a.short===o.short))
-      .sort(sortMat);
-
-    const matin = [n4Matin?.short, ...non4Matin.map(o=>o.short)].filter(Boolean);
-
-    if(!n4Matin) alerts.push(`⛔ S${s} : aucun N4 disponible en matin — glissement manuel requis`);
-    if(!n4Am)    alerts.push(`⛔ S${s} : aucun N4 disponible en AM — glissement manuel requis`);
-    if(matin.length<3) alerts.push(`⚠ S${s} : matin ${matin.length}/3`);
-    if(am.length<2)    alerts.push(`⚠ S${s} : AM ${am.length}/2`);
-
-    // Absences partielles : informatif
-    absWeekPartial.forEach(e=>{
-      const[short,,day]=e.split("|");
-      alerts.push(`ℹ S${s} : ${short} absent le ${day}`);
-    });
-
-    // Congés partiels : informatif (non traités par l'algo mais signalés)
-    (leaves[s]||[]).filter(e=>e.includes(":")).forEach(e=>{
-      const[short,range]=e.split(":");
-      const[sd,ed]=range.split("-").map(Number);
-      alerts.push(`ℹ S${s} : ${short} en congé ${DAYS_FR[sd]}–${DAYS_FR[ed]}`);
-    });
-
-    schedules.push({s, matin, am, nuit, alerts, isOverridden:false});
-
-    matin.forEach(o=>{if(matCount[o]!==undefined)matCount[o]++;});
-    am.forEach(o=>{if(amCount[o]!==undefined)amCount[o]++;});
-    nuit.forEach(o=>{if(nightCount[o]!==undefined)nightCount[o]++;});
-    prevNuit  = nuit;
-    prevMatin = matin;
-    prevAm    = am;
-  }
-  return {schedules, nightCount, matCount, amCount, presentCount};
-}
+// Le moteur partagé et testé est dans scheduler.js.
 
 // ── COMPOSANTS ────────────────────────────────────────────────────────────────
 function LevelBadge({level}){
@@ -371,7 +139,7 @@ function OpChip({name,operators,draggable,onDragStart,onDropChip,highlight}){
         borderRadius:4,padding:"2px 7px",fontSize:12,margin:"2px",fontWeight:500,
         cursor:draggable?"grab":"default",
         outline:highlight?"2px solid #F9A825":"none"}}>
-      {name}
+      {isLeader(op)&&<span title="Chef d’équipe">★</span>}{name}{op?.partnerId&&<span title="Opérateur lié en binôme"> 🔗</span>}
     </span>
   );
 }
@@ -485,141 +253,20 @@ function PublicView() {
                         <div style={{display:"flex",flexDirection:"column",gap:3}}>
                           {ops_in.map(short=>{
                             const op=(operators||[]).find(o=>o.short===short);
-                            return <span key={short} style={{fontSize:12,fontWeight:500}}>{op?.full||short}</span>;
+                            return <span key={short} style={{fontSize:12,fontWeight:500}}>{isLeader(op)?"★ ":""}{op?.full||short}</span>;
                           })}
                         </div>
                       </div>
                     );
                   })}
+                  <DailyChanges schedule={sc}/>
                 </div>
               );
             })}
           </div>
         )}
 
-        {/* Vue Jours */}
-        {publishView==="jours"&&schedules.map(sc=>{
-          const hasSat=(satWeeks||[]).includes(sc.s);
-          const weekSatEnd=(satEndPostes||{})[sc.s]||"N";
-          const satEndIdx={M:0,AM:1,N:2}[weekSatEnd];
-          const shiftIdx={matin:0,am:1,nuit:2};
-          const m=getMondayOfWeek(sc.s,year||2026);
-          const numDays=hasSat?6:5;
-          const feriesDates=getFeries(year||2026);
-          const days=Array.from({length:numDays},(_,d)=>{
-            const date=new Date(m); date.setDate(m.getDate()+d);
-            const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
-            const isChome=!!((joursChomes||{})[`${sc.s}-${dateStr}`]);
-            const isAmenage=(joursAmenages||{})[`${sc.s}-${dateStr}`]!==undefined;
-            return{d,dateStr,isFerie:feriesDates.includes(dateStr),isSat:d===5,isChome,isAmenage,amenage:(joursAmenages||{})[`${sc.s}-${dateStr}`]};
-          });
-          const note=(notes||{})[sc.s];
-          const end=new Date(m); end.setDate(m.getDate()+(numDays-1));
-          return(
-            <div key={sc.s} style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",marginBottom:14,overflow:"hidden"}}>
-              <div style={{background:BRAND,color:"#fff",padding:"8px 14px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                <span style={{fontWeight:700,fontSize:14}}>S{sc.s}</span>
-                <span style={{fontSize:12,opacity:.8}}>{fmtDate(m)} – {fmtDate(end)}</span>
-                {hasSat&&<span style={{fontSize:11,background:"rgba(255,255,255,.2)",borderRadius:3,padding:"1px 6px"}}>Sam. ↳ {weekSatEnd==="M"?"Matin":weekSatEnd==="AM"?"AM":"Nuit"}</span>}
-                {note&&<span style={{fontSize:11,opacity:.8,marginLeft:"auto"}}>{note}</span>}
-              </div>
-              <div style={{overflowX:"auto"}}>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                  <thead>
-                    <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
-                      <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:150}}>Opérateur</th>
-                      {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenage})=>(
-                        <th key={d} style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
-                          color:isChome?"#aaa":isSat?"#e65100":"#666",minWidth:70,
-                          background:isAmenage&&!isChome?"#EDE7F6":"transparent",
-                          opacity:isChome?0.5:1}}>
-                          {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
-                          <span style={{display:"block",fontSize:10,fontWeight:400}}>
-                            {dateStr}
-                            {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
-                          </span>
-                          {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
-                          {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}}>⇄ Aménagé</span>}
-                          {isAmenage&&!isChome&&<AmenageNote entry={amenage}/>}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[
-                      {key:"matin",label:"🌅 Matin",bg:"#D6EFD8",tc:"#1B5E20"},
-                      {key:"am",   label:"🌆 AM",   bg:"#FFF9C4",tc:"#F57F17"},
-                      {key:"nuit", label:"🌙 Nuit",  bg:"#BBDEFB",tc:"#0D47A1"},
-                    ].map(({key,label,bg,tc})=>{
-                      const opsIn=sc[key]||[];
-                      if(!opsIn.length)return null;
-                      return(
-                        <React.Fragment key={key}>
-                          <tr>
-                            <td style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:700,color:tc,whiteSpace:"nowrap"}}>{label}</td>
-                            {days.map(({d,isChome,amenage})=>(
-                              <td key={d} style={{padding:"3px 6px",background:bg,fontSize:10,fontWeight:600,color:tc,textAlign:"center",whiteSpace:"nowrap",opacity:isChome?0.4:1}}>
-                                {shiftHoursLabel(key, amenage)}
-                              </td>
-                            ))}
-                          </tr>
-                          {opsIn.map(short=>{
-                            const op=(operators||[]).find(o=>o.short===short);
-                            return(
-                              <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
-                                <td style={{padding:"5px 10px",fontWeight:500}}>{op?.full||short}</td>
-                                {days.map(({d,isSat,isChome})=>{
-                                  const isOff=isSat&&shiftIdx[key]>satEndIdx;
-                                  const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
-                                  const absent=isDayAbsent(short, sc.s, dayLabel);
-                                  const off=isOff||isChome||absent;
-                                  return(
-                                    <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent"}}>
-                                      <span style={{background:off?"#f5f5f5":bg,color:off?"#bbb":tc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                        {off?"—":key==="matin"?"M":key==="am"?"AM":"N"}
-                                      </span>
-                                      {absent&&!isChome&&!isOff&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
-                                    </td>
-                                  );
-                                })}
-                              </tr>
-                            );
-                          })}
-                        </React.Fragment>
-                      );
-                    })}
-                    {/* Volants en journée — exclus s'ils sont dans un poste ou absents/congé toute la semaine */}
-                    {(operators||[]).filter(o=>o.isVolant&&o.active).map(op=>{
-                      const inPlanning=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
-                      if(inPlanning || isFullOut(op.short, sc.s))return null;
-                      return(
-                        <React.Fragment key={op.short}>
-                          <tr><td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0"}}>☀️ Journée</td></tr>
-                          <tr style={{borderBottom:"0.5px solid #f5f5f5"}}>
-                            <td style={{padding:"5px 10px",fontWeight:500}}>{op.full}</td>
-                            {days.map(({d,isChome})=>{
-                              const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
-                              const absent=isDayAbsent(op.short, sc.s, dayLabel);
-                              const off=isChome||absent;
-                              return(
-                                <td key={d} style={{padding:"4px 6px",textAlign:"center",background:isChome?"#f9f9f9":"transparent"}}>
-                                  <span style={{background:off?"#f5f5f5":"#EDE7F6",color:off?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500}}>
-                                    {off?"—":"J"}
-                                  </span>
-                                  {absent&&!isChome&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        </React.Fragment>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          );
-        })}
+        {publishView==="jours"&&<DailyPlanning schedules={schedules} operators={operators||[]} year={year} absences={absences} leaves={leaves} satWeeks={satWeeks} satEndPostes={satEndPostes} joursChomes={joursChomes} joursAmenages={joursAmenages} notes={notes}/>}
 
       </div>
     </div>
@@ -666,7 +313,7 @@ export default function App(){
 // ── APP PRINCIPALE (admin) ────────────────────────────────────────────────────
 function AdminApp(){
   const [tab,setTab]             = useState("planning");
-  const [operators,setOperators] = useState(DEFAULT_OPERATORS);
+  const [operatorRecords,setOperatorRecords] = useState(()=>normalizeOperators(DEFAULT_OPERATORS));
   const [absences,setAbsences]   = useState({});
   const [leaves,setLeaves]       = useState({});
   const [overrides,setOverrides] = useState({}); // { semaine: {matin,am,nuit} }
@@ -676,7 +323,16 @@ function AdminApp(){
   const [joursChomes,setJoursChomes]   = useState({}); // { "semaine-dateStr": true } jour chômé = toute l'équipe absente
   const [joursAmenages,setJoursAmenages] = useState({}); // { "semaine-dateStr": "créneau" } horaires aménagés (postes décalés/chevauchement) — info, heures inchangées
   const [notes,setNotes]             = useState({});
-  const [year,setYear]           = useState(2026);
+  const [year,setYear] = useState(()=>isoWeek(new Date()).year);
+  const yearRef=useRef(year);
+  const [annual,setAnnual]=useState({version:2,years:{}});
+  const annualRef=useRef(annual);
+  const operators=React.useMemo(()=>operatorsInYear(operatorRecords,year),[operatorRecords,year]);
+  const setOperators=next=>setOperatorRecords(current=>mergeYearOperatorEdits(current,next,yearRef.current));
+  const [locks,setLocks]=useState({});
+  const [dailyOverrides,setDailyOverrides]=useState({});
+  const [dayEditor,setDayEditor]=useState(null);
+  const [calcYear,setCalcYear]=useState(null);
   const [hoursMonth,setHoursMonth] = useState(()=>new Date().getMonth());   // 0-11, récap d'heures
   const [hoursYear,setHoursYear]   = useState(()=>new Date().getFullYear());
   const [history,setHistory]     = useState([]);
@@ -692,20 +348,27 @@ function AdminApp(){
   const [leaveFrom,setLeaveFrom] = useState(()=>getCurrentWeek(new Date().getFullYear())); const [leaveTo,setLeaveTo]     = useState(()=>getCurrentWeek(new Date().getFullYear()));
   const [leaveFromDay,setLeaveFromDay] = useState(1); const [leaveToDay,setLeaveToDay]   = useState(5);
   const [showAddOp,setShowAddOp] = useState(false);
-  const [newOp,setNewOp]         = useState({prenom:"",nom:"",level:"N1"});
+  const [newOp,setNewOp]         = useState({prenom:"",nom:"",level:"N1",isLeader:false});
   const [syncMsg,setSyncMsg]     = useState("Chargement...");
   const [flashMsg,setFlashMsg]   = useState(null);
   const [schedules,setSchedules] = useState([]);
   const [allSchedules,setAllSchedules] = useState([]); // S1 → fin de fenêtre (archivage + export paie)
   const [equity,setEquity]       = useState([]);
   const [loaded,setLoaded]       = useState(false);
+  const [loadError,setLoadError] = useState("");
+  const [saveErrors,setSaveErrors] = useState({});
+  const [pendingSaves,setPendingSaves] = useState(0);
+  const [publishedSnapshot,setPublishedSnapshot] = useState(null);
+  const draftRef = useRef("");
+  const failedWrites = useRef(new Map());
   const [publishModal,setPublishModal] = useState(false);
   const [publishNbWeeks,setPublishNbWeeks] = useState(3);
   const [amenageEdit,setAmenageEdit]   = useState(null); // { week, dateStr, dayLabel } | null
   const [amenageDraft,setAmenageDraft] = useState(null); // { matin:{s,e}, am, nuit, commun }
   const dragRef = useRef(null);
 
-  const weeks = Array.from({length:numWeeks},(_,i)=>startWeek+i);
+  const endWeek=Math.min(startWeek+numWeeks-1,weeksInYear(year));
+  const weeks = Array.from({length:Math.max(0,endWeek-startWeek+1)},(_,i)=>startWeek+i);
   const currentWeek = getCurrentWeek(year);
   // Archive de l'année affichée uniquement — les semaines de 2026 ne doivent
   // jamais s'appliquer au planning 2027 (les numéros de semaine se répètent)
@@ -718,28 +381,67 @@ function AdminApp(){
     (async()=>{
       try{
         setSyncMsg("Connexion...");
-        const [ops,abs,lv,ov,ar,sw,sep,jc,ja,nt,hi,rs,yr]=await Promise.all([
+        const [ops,abs,lv,ov,ar,sw,sep,jc,ja,nt,hi,rs,yr,draft,published,annualStored]=await Promise.all([
           sbGetOps(),sbGet("absences"),sbGet("leaves"),sbGet("overrides"),sbGet("archive"),
-          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("joursamenages"),sbGet("notes"),sbGet("history"),sbGet("redostack"),sbGet("year"),
+          sbGet("satweeks"),sbGet("satendpostes"),sbGet("jourschomes"),sbGet("joursamenages"),sbGet("notes"),sbGet("history"),sbGet("redostack"),sbGet("year"),sbGet("planning_draft"),sbGet("published_planning"),sbGet("planning_years"),
         ]);
-        if(ops&&ops.length>0)setOperators(ops);
-        if(abs)setAbsences(abs); if(lv)setLeaves(lv); if(ov)setOverrides(ov); if(ar)setArchive(ar);
-        if(sw)setSatWeeks(sw); if(sep)setSatEndPostes(sep); if(jc)setJoursChomes(jc); if(ja)setJoursAmenages(ja);
-        if(nt)setNotes(nt); if(hi)setHistory(hi); if(rs)setRedoStack(rs);
-        if(yr)setYear(Number(yr));
+        const loadedYear=Number(yr)||isoWeek(new Date()).year;
+        const store=migrateYears(annualStored,{absences:abs,leaves:lv,overrides:ov,satweeks:sw,satendpostes:sep,jourschomes:jc,joursamenages:ja,notes:nt,history:hi,redostack:rs,planning_draft:draft},loadedYear);
+        const data=yearData(store,loadedYear);
+        const records=migrateEmployment(ops?.length?ops:DEFAULT_OPERATORS,store.legacyYear||loadedYear);
+        const loadedOps=operatorsInYear(records,loadedYear);
+        setOperatorRecords(records);
+        setPublishedSnapshot(published);
+        // Freeze the previously displayed past BEFORE the new solver can run.
+        const migratedArchive={...(ar||{})};
+        const existing={...(migratedArchive[loadedYear]||{})};
+        if(loadedYear<=isoWeek(new Date()).year) {
+          const cutoff=loadedYear<isoWeek(new Date()).year?weeksInYear(loadedYear)+1:getCurrentWeek(loadedYear);
+          const legacy=legacyBuildSchedules(loadedOps,1,Math.max(0,cutoff-1),data.absences,data.leaves,data.overrides,existing).schedules;
+          const frozenSource=(data.planning_draft?.year===loadedYear?data.planning_draft.schedules:null)||[];
+          const publicSource=(published?.year===loadedYear ? published.schedules : null)||[];
+          for(const old of legacy) if(!existing[old.s]) {
+            const source=frozenSource.find(x=>x.s===old.s)||publicSource.find(x=>x.s===old.s)||old;
+            existing[old.s]={matin:[...source.matin],am:[...source.am],nuit:[...source.nuit],...(source.dailySchedules?{dailySchedules:source.dailySchedules}:{}),source:source===old?"legacy-reconstructed":"saved-snapshot"};
+          }
+          migratedArchive[loadedYear]=existing;
+          if(JSON.stringify(migratedArchive)!==JSON.stringify(ar||{})) await sbSet("archive",migratedArchive);
+        }
+        setArchive(migratedArchive);
+        if(annualStored?.version!==2)await sbSet("planning_years",store);
+        annualRef.current=store;setAnnual(store);
+        yearRef.current=loadedYear;setYear(loadedYear);loadAnnualData(data);
+        setStartWeek(w=>Math.min(w,weeksInYear(loadedYear)));
         setSyncMsg("Synchronisé ✓");
-      }catch(e){setSyncMsg(`Erreur: ${e.message}`);}
-      finally{setLoaded(true);}
+        setLoaded(true);
+      }catch(e){setSyncMsg(`Erreur: ${e.message}`);setLoadError(e.message);}
     })();
   },[]);
 
-  const save = useCallback(async(k,v)=>{
-    setSyncMsg("Enreg...");
-    try{await sbSet(k,v);setSyncMsg("Synchronisé ✓");}
-    catch{setSyncMsg("Erreur sync");}
+  function loadAnnualData(data){
+    setAbsences(data.absences);setLeaves(data.leaves);setOverrides(data.overrides);
+    setSatWeeks(data.satweeks);setSatEndPostes(data.satendpostes);setJoursChomes(data.jourschomes);setJoursAmenages(data.joursamenages);
+    setNotes(data.notes);setHistory(data.history);setRedoStack(data.redostack);setLocks(data.locks);setDailyOverrides(data.dailyOverrides);
+  }
+  const save=useCallback(async(k,v,targetYear=yearRef.current)=>{
+    const annualKey=ANNUAL_KEYS.includes(k),errorKey=annualKey?`planning_years:${targetYear}:${k}`:k;
+    let value=v;
+    if(annualKey){value=setYearValue(annualRef.current,targetYear,k,v);annualRef.current=value;setAnnual(value);}
+    setSyncMsg("Enreg...");setPendingSaves(n=>n+1);
+    try{
+      await sbSet(annualKey?"planning_years":k,value);
+      for(const key of failedWrites.current.keys())if(key===errorKey||(annualKey&&key.startsWith("planning_years:")))failedWrites.current.delete(key);
+      setSaveErrors(prev=>Object.fromEntries(Object.entries(prev).filter(([key])=>key!==errorKey&&!(annualKey&&key.startsWith("planning_years:")))));
+      setSyncMsg("Synchronisé ✓");return true;
+    }catch(e){failedWrites.current.set(errorKey,()=>save(k,v,targetYear));setSaveErrors(prev=>({...prev,[errorKey]:e.message}));setSyncMsg("Erreur sync");return false;}
+    finally{setPendingSaves(n=>n-1);}
   },[]);
 
-  const saveOperators   = useCallback(v=>{setOperators(v);sbSetOps(v).then(()=>setSyncMsg("Synchronisé ✓")).catch(()=>setSyncMsg("Erreur sync"));},[]);
+  const saveOperators = useCallback(v=>{
+    const next=normalizeOperators(mergeYearOperatorEdits(operatorRecords,v,yearRef.current));setOperatorRecords(next);setSyncMsg("Enreg...");setPendingSaves(n=>n+1);
+    return sbSetOps(next).then(()=>{failedWrites.current.delete("operators");setSaveErrors(prev=>{const n={...prev};delete n.operators;return n;});setSyncMsg("Synchronisé ✓");})
+      .catch(e=>{failedWrites.current.set("operators",()=>saveOperators(next));setSaveErrors(prev=>({...prev,operators:e.message}));setSyncMsg("Erreur sync");}).finally(()=>setPendingSaves(n=>n-1));
+  },[operatorRecords]);
   const saveAbsences    = useCallback(v=>{setAbsences(v);    save("absences",v);},[save]);
   const saveLeaves      = useCallback(v=>{setLeaves(v);      save("leaves",v);},[save]);
   const saveOverrides   = useCallback(v=>{setOverrides(v);   save("overrides",v);},[save]);
@@ -749,16 +451,20 @@ function AdminApp(){
   const saveJoursChomes = useCallback(v=>{setJoursChomes(v);save("jourschomes",v);},[save]);
   const saveJoursAmenages=useCallback(v=>{setJoursAmenages(v);save("joursamenages",v);},[save]);
   const saveNotes       = useCallback(v=>{setNotes(v);       save("notes",v);},[save]);
-  const saveYear        = useCallback(v=>{setYear(v);        save("year",String(v));},[save]);
+  const saveYear = v=>{
+    const next=Number(v);yearRef.current=next;setYear(next);loadAnnualData(yearData(annualRef.current,next));
+    setAllSchedules([]);setSchedules([]);setCalcYear(null);draftRef.current="";
+    setStartWeek(w=>Math.min(w,weeksInYear(next)));setDayEditor(null);
+    save("year",String(next));
+  };
+  const saveLocks=v=>{setLocks(v);save("locks",v);};
+  const saveDailyOverrides=v=>{setDailyOverrides(v);save("dailyOverrides",v);};
 
   const pushHistory = useCallback((label,state)=>{
-    setHistory(prev=>{
-      const next=[{label,ts:Date.now(),state},...prev].slice(0,15);
-      sbSet("history",next); return next;
-    });
-    // Toute nouvelle action invalide la pile de rétablissement
-    setRedoStack([]); sbSet("redostack",[]);
-  },[]);
+    const next=[{label,ts:Date.now(),state},...history].slice(0,15);
+    setHistory(next);save("history",next);
+    setRedoStack([]);save("redostack",[]);
+  },[history,save]);
 
   // ── CALCUL PLANNING
   // Construit depuis S1 pour des compteurs d'équité précis sur l'année entière.
@@ -766,7 +472,9 @@ function AdminApp(){
   const recompute = (ops,abs,lv,ov,arc,wks)=>{
     if(!wks.length) return;
     const displayEnd = wks[wks.length-1];
-    const {schedules:allSc,nightCount,matCount,amCount,presentCount} = buildSchedules(ops,1,displayEnd,abs,lv,ov,arc);
+    const {schedules:weekly,nightCount,matCount,amCount,presentCount} = buildSchedules(ops,1,displayEnd,abs,lv,ov,arc,{year,satWeeks,satEndPostes,joursChomes,locks,previousSchedule:archive[year-1]?.[weeksInYear(year-1)]});
+    const allSc=applyDailyPlanning(weekly,ops,year,abs,lv,{satWeeks,satEndPostes,joursChomes,joursAmenages,locks,dailyOverrides});
+    setCalcYear(year);
     setAllSchedules(allSc);
     setSchedules(allSc.filter(s=>s.s>=wks[0]));
     const eq = ops.filter(o=>o.active).map(op=>({
@@ -786,7 +494,7 @@ function AdminApp(){
   useEffect(()=>{
     if(!loaded)return;
     recompute(operators,absences,leaves,overrides,yearArchive,weeks);
-  },[loaded,startWeek,numWeeks,operators,absences,leaves,archive,year]);
+  },[loaded,startWeek,numWeeks,operators,absences,leaves,archive,year,satWeeks,satEndPostes,joursChomes,joursAmenages,locks,dailyOverrides]);
 
   // ── ARCHIVAGE AUTOMATIQUE des semaines écoulées ──────────────────────────
   // Dès qu'une semaine passe (S < semaine courante), son planning est figé tel
@@ -794,14 +502,24 @@ function AdminApp(){
   // réécrivent plus le passé. C'est la référence pour la paie et le suivi.
   useEffect(()=>{
     if(!loaded) return;
-    if(year!==new Date().getFullYear()) return; // archive uniquement l'année en cours
+    if(calcYear!==year || year!==isoWeek(new Date()).year) return; // archive uniquement l'année en cours
     const toAdd={};
     allSchedules.forEach(sc=>{
       if(sc.s<currentWeek && !yearArchive[sc.s])
-        toAdd[sc.s]={matin:sc.matin,am:sc.am,nuit:sc.nuit};
+        toAdd[sc.s]={matin:sc.matin,am:sc.am,nuit:sc.nuit,dailySchedules:sc.dailySchedules};
     });
     if(Object.keys(toAdd).length) saveArchive({...archive,[year]:{...yearArchive,...toAdd}});
   },[loaded,allSchedules]);
+
+  // Keep the actual draft so an elapsed week is never rebuilt with new rules on reopening.
+  useEffect(()=>{
+    if(!loaded || calcYear!==year || !allSchedules.length) return;
+    const draft={year,schedules:allSchedules.map(({s,matin,am,nuit,dailySchedules})=>({s,matin,am,nuit,dailySchedules}))};
+    const serialized=JSON.stringify(draft);
+    if(draftRef.current===serialized)return;
+    const timer=setTimeout(()=>{draftRef.current=serialized;save("planning_draft",draft,year).then(ok=>{if(!ok)draftRef.current="";});},400);
+    return ()=>clearTimeout(timer);
+  },[loaded,allSchedules,year,calcYear,save]);
 
   // ── RECALCULER : efface les overrides à partir de startWeek, repart de l'algo.
   // Les overrides AVANT startWeek sont conservés comme base de contexte
@@ -809,15 +527,15 @@ function AdminApp(){
   // Cas d'usage : modifier manuellement S23, sélectionner S24 comme départ,
   // cliquer Recalculer → l'algo se base sur la config manuelle de S23.
   const recalculate = ()=>{
-    const affectedOvCount = Object.keys(overrides).filter(wk=>parseInt(wk)>=startWeek).length;
+    const affectedOvCount = Object.keys(overrides).filter(wk=>parseInt(wk)>=startWeek && parseInt(wk)<=endWeek && !isWeekLocked(Number(wk))).length;
     if(affectedOvCount>0 && !window.confirm(
-      `⚠ Recalculer va supprimer ${affectedOvCount} ajustement(s) manuel(s) à partir de S${startWeek}.\n\nLes overrides avant S${startWeek} sont conservés comme base.\nL'algorithme recalcule de S${startWeek} à S${startWeek+numWeeks-1}.\n\nContinuer ?`
+      `⚠ Recalculer va supprimer ${affectedOvCount} ajustement(s) manuel(s) entre S${startWeek} et S${endWeek}.\n\nLes autres semaines et les affectations verrouillées sont conservées.\nL'algorithme recalcule de S${startWeek} à S${endWeek}.\n\nContinuer ?`
     )) return;
     pushHistory("Recalcul planning",{overrides});
     // Garder les overrides AVANT startWeek (base de contexte)
     const cleanedOverrides = {};
     Object.entries(overrides).forEach(([wk, slots])=>{
-      if(parseInt(wk) < startWeek) cleanedOverrides[wk] = slots;
+      if(parseInt(wk)<startWeek || parseInt(wk)>endWeek || isWeekLocked(Number(wk))) cleanedOverrides[wk] = slots;
     });
     saveOverrides(cleanedOverrides);
     recompute(operators, absences, leaves, cleanedOverrides, yearArchive, weeks);
@@ -882,16 +600,16 @@ function AdminApp(){
     saveLeaves(next);
     // ── Alerte préventive : vérifier disponibilité N4 semaine par semaine
     const n4Warnings=[];
-    const n4Base = operators.filter(o=>o.active&&o.level==="N4"&&!o.isVolant);
+    const n4Base = operators.filter(o=>o.active&&isLeader(o)&&!o.isVolant);
     for(let w=leaveFrom;w<=leaveTo;w++){
       const onFullLeave = n4Base.filter(o=>(next[w]||[]).some(e=>e===o.short)).map(o=>o.short);
       const onFullAbs   = (absences[w]||[]).filter(e=>!e.includes("|"));
       const unavail     = new Set([...onFullLeave,...onFullAbs]);
-      const avail       = n4Base.filter(o=>!unavail.has(o.short));
-      if(avail.length<3) n4Warnings.push(`S${w} : ${avail.length}/3 N4`);
+      const avail       = n4Base.filter(o=>inWindow(o,w)&&!unavail.has(o.short));
+      if(avail.length<3) n4Warnings.push(`S${w} : ${avail.length}/3 chefs`);
     }
     if(n4Warnings.length>0)
-      flash(`Congé enregistré — ⚠ Effectif N4 critique : ${n4Warnings.slice(0,3).join(" · ")}${n4Warnings.length>3?` +${n4Warnings.length-3}`:""}`, "#e65100");
+      flash(`Congé enregistré — ⚠ Effectif chefs critique : ${n4Warnings.slice(0,3).join(" · ")}${n4Warnings.length>3?` +${n4Warnings.length-3}`:""}`, "#e65100");
     else
       flash(`Congé ajouté : ${leaveOp}`);
   };
@@ -908,76 +626,24 @@ function AdminApp(){
     const short = operators.find(o=>o.full===name)?.short || name;
     dragRef.current={week,shift,name:short};
   };
-  const onDrop = (week,targetShift)=>{
-    const src=dragRef.current;
-    if(!src){ dragRef.current=null; return; }
-
-    const cur = schedules.find(s=>s.s===week);
-    if(!cur){ dragRef.current=null; return; }
-    if(isWeekLocked(week)){flash("Semaine écoulée — modification impossible","#c62828");dragRef.current=null;return;}
-
-    const existing = overrides[week]||{matin:[...cur.matin],am:[...cur.am],nuit:[...cur.nuit]};
-
-    // Cas : glissement depuis la réserve volants
-    if(src.shift==="reserve"){
-      if((existing[targetShift]||[]).includes(src.name)){
-        flash(`${src.name} déjà en ${targetShift} S${week}`,"#c62828");
-        dragRef.current=null; return;
-      }
-      pushHistory(`Volant: ${src.name} → ${targetShift} S${week}`,{overrides});
-      const newOvR={...overrides,[week]:{
-        ...existing,
-        [targetShift]:[...(existing[targetShift]||[]),src.name],
-      }};
-      setOverrides(newOvR);
-      save("overrides",newOvR);
-      recompute(operators,absences,leaves,newOvR,yearArchive,weeks);
-      flash(`${src.name} → ${targetShift} S${week}`);
-      dragRef.current=null; return;
-    }
-
-    // Cas : glissement entre postes de la même semaine
-    if(src.shift===targetShift||src.week!==week){ dragRef.current=null; return; }
-
-    const nSrc=(existing[src.shift]||[]).filter(n=>n!==src.name);
-    const nTgt=[...(existing[targetShift]||[]),src.name];
-    pushHistory(`Glissement: ${src.name} S${week} ${src.shift}→${targetShift}`,{overrides});
-    const newOvG={...overrides,[week]:{
-      ...existing,
-      [src.shift]:   nSrc,
-      [targetShift]: nTgt,
-    }};
-    setOverrides(newOvG);
-    save("overrides",newOvG);
-    recompute(operators,absences,leaves,newOvG,yearArchive,weeks);
-    flash(`${src.name} → ${targetShift} S${week}`);
-    dragRef.current=null;
+  const applyDrop = (week,targetShift,targetName=null)=>{
+    const src=dragRef.current;dragRef.current=null;
+    if(!src || (src.week!==null && src.week!==week))return;
+    if(isWeekLocked(week)){flash("Semaine écoulée — modification impossible","#c62828");return;}
+    if(src.shift===targetShift)return;
+    const cur=schedules.find(sc=>sc.s===week);if(!cur)return;
+    try {
+      const slots=moveAssignment(cur,operators,week,absences,leaves,src.name,targetShift,targetName);
+      if(validateSchedule(slots,operators,week,absences,leaves,{}, {year,locks}).some(i=>i.code==="locked-assignment"))throw new Error("Déverrouille l'affectation avant de la déplacer.");
+      pushHistory(`Affectation : ${src.name}${targetName?` ↔ ${targetName}`:` → ${targetShift}`} S${week}`,{overrides});
+      const next={...overrides,[week]:slots};
+      saveOverrides(next);
+      recompute(operators,absences,leaves,next,yearArchive,weeks);
+      flash("Affectation enregistrée — binôme déplacé ensemble si présent");
+    } catch(e){flash(e.message,"#c62828");}
   };
-
-  // ── ÉCHANGE EN UN CLIC : déposer un opérateur SUR un autre = swap des postes
-  // Cas d'usage : arrangement ponctuel entre deux ouvriers ("je te prends ta
-  // nuit, tu prends mon matin") sans faire deux glissements.
-  const onSwap = (week,targetShift,targetName)=>{
-    const src=dragRef.current;
-    // Pas un échange (réserve, autre semaine, soi-même) → comportement glissement normal
-    if(!src||src.shift==="reserve"||src.week!==week||src.name===targetName){ onDrop(week,targetShift); return; }
-    if(src.shift===targetShift){ dragRef.current=null; return; } // même poste : rien à échanger
-    if(isWeekLocked(week)){flash("Semaine écoulée — modification impossible","#c62828");dragRef.current=null;return;}
-    const cur = schedules.find(s=>s.s===week);
-    if(!cur){ dragRef.current=null; return; }
-    const existing = overrides[week]||{matin:[...cur.matin],am:[...cur.am],nuit:[...cur.nuit]};
-    pushHistory(`Échange: ${src.name} ↔ ${targetName} S${week}`,{overrides});
-    const newOvS={...overrides,[week]:{
-      ...existing,
-      [src.shift]:   [...(existing[src.shift]||[]).filter(n=>n!==src.name),targetName],
-      [targetShift]: [...(existing[targetShift]||[]).filter(n=>n!==targetName),src.name],
-    }};
-    setOverrides(newOvS);
-    save("overrides",newOvS);
-    recompute(operators,absences,leaves,newOvS,yearArchive,weeks);
-    flash(`Échange ${src.name} ↔ ${targetName} S${week} ✓`);
-    dragRef.current=null;
-  };
+  const onDrop=(week,targetShift)=>applyDrop(week,targetShift);
+  const onSwap=(week,targetShift,targetName)=>applyDrop(week,targetShift,operators.find(o=>o.full===targetName)?.short||targetName);
 
   // ── UNDO / REDO ───────────────────────────────────────────────────────────
   // history = états AVANT chaque action ; redoStack = états annulés, rétablissables.
@@ -989,15 +655,19 @@ function AdminApp(){
     if(tpl.absences!==undefined)  s.absences=absences;
     if(tpl.leaves!==undefined)    s.leaves=leaves;
     if(tpl.overrides!==undefined) s.overrides=overrides;
+    if(tpl.locks!==undefined)s.locks=locks;
+    if(tpl.dailyOverrides!==undefined)s.dailyOverrides=dailyOverrides;
     return s;
   };
   // Applique un état partiel (les clés absentes gardent la valeur courante).
   const applyState = st =>{
     const nOps=st.operators||operators, nAbs=st.absences||absences, nLv=st.leaves||leaves, nOv=st.overrides||overrides;
-    if(st.operators)  { setOperators(nOps);  sbSetOps(nOps); }
+    if(st.operators)  { saveOperators(nOps); }
     if(st.absences)   { setAbsences(nAbs);   save("absences", nAbs); }
     if(st.leaves)     { setLeaves(nLv);      save("leaves",   nLv); }
     if(st.overrides)  { setOverrides(nOv);   save("overrides",nOv); }
+    if(st.locks!==undefined)saveLocks(st.locks);
+    if(st.dailyOverrides!==undefined)saveDailyOverrides(st.dailyOverrides);
     recompute(nOps, nAbs, nLv, nOv, yearArchive, weeks);
   };
   const undoLast = ()=>{
@@ -1005,8 +675,8 @@ function AdminApp(){
     const last=history[0];
     const redoEntry={label:last.label, state:snapshotKeys(last.state)}; // état actuel, avant restauration
     applyState(last.state);
-    const newH=history.slice(1); setHistory(newH); sbSet("history",newH);
-    const newR=[redoEntry,...redoStack].slice(0,15); setRedoStack(newR); sbSet("redostack",newR);
+    const newH=history.slice(1); setHistory(newH); save("history",newH);
+    const newR=[redoEntry,...redoStack].slice(0,15); setRedoStack(newR); save("redostack",newR);
     flash(`Annulé : ${last.label}`,"#c62828");
   };
   const redoLast = ()=>{
@@ -1014,8 +684,8 @@ function AdminApp(){
     const next=redoStack[0];
     const histEntry={label:next.label, ts:Date.now(), state:snapshotKeys(next.state)};
     applyState(next.state);
-    const newR=redoStack.slice(1); setRedoStack(newR); sbSet("redostack",newR);
-    const newH=[histEntry,...history].slice(0,15); setHistory(newH); sbSet("history",newH);
+    const newR=redoStack.slice(1); setRedoStack(newR); save("redostack",newR);
+    const newH=[histEntry,...history].slice(0,15); setHistory(newH); save("history",newH);
     flash(`Rétabli : ${next.label}`,"#2e7d32");
   };
 
@@ -1023,25 +693,51 @@ function AdminApp(){
   const addOperator = ()=>{
     if(!newOp.prenom.trim()||!newOp.nom.trim())return;
     const short=newOp.nom.toUpperCase().trim();
+    if(operators.some(o=>o.short===short)){flash("Ce nom court existe déjà. Ajoute une initiale pour distinguer les homonymes.","#c62828");return;}
+    pushHistory(`Ajout : ${short}`,{operators});
     // Tous les nouveaux opérateurs sont intégrés à l'algo automatiquement (isVolant:false).
     // L'utilisateur peut passer un op en volant manuellement depuis l'onglet Équipe.
-    const op={id:`op_${Date.now()}`,full:`${newOp.prenom.trim()} ${short}`,short,level:newOp.level,active:true,isVolant:false};
+    const op={id:`op_${Date.now()}`,full:`${newOp.prenom.trim()} ${short}`,short,level:newOp.level,isLeader:newOp.isLeader,partnerId:null,active:true,isVolant:false,fromWeek:Math.max(startWeek,currentWeek),employmentFrom:{year,week:Math.max(startWeek,Math.min(currentWeek,weeksInYear(year)))},employmentTo:null};
     saveOperators([...operators,op]);
-    setNewOp({prenom:"",nom:"",level:"N1"}); setShowAddOp(false);
+    setNewOp({prenom:"",nom:"",level:"N1",isLeader:false}); setShowAddOp(false);
     flash(`${op.full} ajouté — intégré au planning automatique`);
   };
-  const toggleActive  = id=>saveOperators(operators.map(o=>o.id===id?{...o,active:!o.active}:o));
-  const toggleVolant  = id=>saveOperators(operators.map(o=>o.id===id?{...o,isVolant:!o.isVolant}:o));
+  const updateOperator=(id,patch)=>{
+    const op=operators.find(o=>o.id===id);if(!op)return;
+    if(patch.isLeader && isLeader(operators.find(o=>o.id===op.partnerId))){flash("Le binôme est déjà chef : dissocie-les avant de nommer un second chef.","#c62828");return;}
+    if("fromWeek" in patch)patch={...patch,employmentFrom:patch.fromWeek?{year,week:patch.fromWeek}:null};
+    if("toWeek" in patch)patch={...patch,employmentTo:patch.toWeek?{year,week:patch.toWeek}:null};
+    const next={...op,...patch};
+    if(next.employmentFrom&&next.employmentTo&&(next.employmentFrom.year*100+next.employmentFrom.week>next.employmentTo.year*100+next.employmentTo.week)){flash("La fin de contrat précède l'arrivée.","#c62828");return;}
+    if((next.fromWeek && (next.fromWeek<1||next.fromWeek>53)) || (next.toWeek && (next.toWeek<1||next.toWeek>53)) || (next.fromWeek&&next.toWeek&&next.fromWeek>next.toWeek)){flash("Période invalide : arrivée avant départ, semaines de 1 à 53.","#c62828");return;}
+    pushHistory(`Équipe : ${op.short}`,{operators});
+    saveOperators(operators.map(o=>o.id===id?next:o));
+  };
+  const setPartner=(id,partnerId)=>{
+    try {const next=linkOperators(operators,id,partnerId);pushHistory("Modification du binôme",{operators});saveOperators(next);}
+    catch(e){flash(e.message,"#c62828");}
+  };
+  const toggleActive = id=>updateOperator(id,{active:!operators.find(o=>o.id===id).active});
+  const toggleVolant = id=>{
+    const op=operators.find(o=>o.id===id);
+    pushHistory(`Mode volant : ${op.short} et son binôme`,{operators});
+    saveOperators(operators.map(o=>(o.id===id||o.id===op.partnerId)?{...o,isVolant:!op.isVolant}:o));
+  };
   const deleteOp = id=>{
     if(!window.confirm("Supprimer définitivement ?")) return;
     const op = operators.find(o=>o.id===id);
-    const next = operators.filter(o=>o.id!==id);
+    // Retain historical people for payroll instead of removing their identity.
+    const used=Object.values(archive).some(yr=>Object.values(yr).some(sc=>[...sc.matin,...sc.am,...sc.nuit].includes(op.short)));
+    if(used){flash("Cet opérateur figure dans l'historique : renseigne sa semaine de départ ou désactive-le.","#c62828");return;}
+    pushHistory(`Suppression : ${op.short}`,{operators,overrides});
+    const next = operators.filter(o=>o.id!==id).map(o=>o.partnerId===id?{...o,partnerId:null}:o);
     saveOperators(next);
     // Nettoyer les overrides : retirer l'opérateur supprimé de toutes les semaines
     if(op && Object.keys(overrides).length>0){
       const cleaned = {};
       let changed = false;
       Object.entries(overrides).forEach(([wk, slots])=>{
+        if(isWeekLocked(Number(wk))){cleaned[wk]=slots;return;}
         const cl = {
           matin: (slots.matin||[]).filter(s=>s!==op.short),
           am:    (slots.am||[]).filter(s=>s!==op.short),
@@ -1055,7 +751,7 @@ function AdminApp(){
   };
 
   // Semaine verrouillée : strictement inférieure à la semaine courante
-  const isWeekLocked = w => w < currentWeek;
+  const isWeekLocked = w => year<isoWeek(new Date()).year || (year===isoWeek(new Date()).year && w<currentWeek) || !!yearArchive[w];
 
   const toggleJourChome = (weekNum, dateStr) => {
     if(isWeekLocked(weekNum)){flash("Semaine écoulée — modification impossible","#c62828");return;}
@@ -1112,9 +808,33 @@ function AdminApp(){
     saveSatEndPostes({...satEndPostes,[w]:v});
   };
 
+  const setAssignmentLock=(week,id,shift)=>{
+    if(isWeekLocked(week)){flash("Semaine archivée : verrouillage impossible","#c62828");return;}
+    const op=operators.find(o=>o.id===id);
+    if(shift&&(!op?.active||!inWindow(op,week))){flash("Opérateur indisponible cette semaine","#c62828");return;}
+    const entries={...(locks[week]||{})};
+    if(shift)entries[id]=shift;else delete entries[id];
+    const other=operators.find(o=>o.id===op?.partnerId);
+    if(shift&&other&&entries[other.id]&&entries[other.id]!==shift){flash("Le binôme est verrouillé sur un autre poste : déverrouille-le d’abord.","#c62828");return;}
+    pushHistory(`Verrouillage : ${op?.short||id} S${week}`,{locks});
+    saveLocks({...locks,[week]:entries});
+  };
+  const saveDay=slots=>{
+    const {week,day}=dayEditor;
+    if(isWeekLocked(week)){flash("Semaine archivée : affectations figées","#c62828");return;}
+    const date=isoDate(dateOfDay(year,week,day)),next={...dailyOverrides};
+    if(slots)next[date]=slots;else delete next[date];
+    pushHistory(`Affectations du ${date}`,{dailyOverrides});saveDailyOverrides(next);setDayEditor(null);
+  };
+
   // ── PUBLICATION
   const publish = async()=>{
+    await writeQueue.catch(()=>{});
+    if(failedWrites.current.size){flash("Sauvegarde incomplète : réessaie avant de publier.","#c62828");return;}
     const toPublish = schedules.slice(0, publishNbWeeks);
+    const errors=toPublish.filter(sc=>!sc.isArchived).flatMap(sc=>sc.issues||[]).filter(i=>i.severity==="error");
+    if(errors.length){flash(`Publication bloquée : ${errors[0].message}. Corrige les alertes rouges.`,"#c62828");return;}
+    if(Object.keys(saveErrors).length){flash("Corrige les erreurs de sauvegarde avant de publier.","#c62828");return;}
     const snapshot = {
       schedules: toPublish,
       operators: operators.filter(o=>o.active),
@@ -1127,11 +847,13 @@ function AdminApp(){
       notes,
       year,
       publishView,
+      locks, dailyOverrides,
       publishedAt: new Date().toISOString(),
     };
     setSyncMsg("Publication...");
     try {
       await sbSet("published_planning", snapshot);
+      setPublishedSnapshot(snapshot);
       setSyncMsg("Synchronisé ✓");
       setPublishModal(false);
       flash(`Planning publié — ${publishNbWeeks} semaine(s) en vue ${publishView==="jours"?"Jours":"Colonnes"}`);
@@ -1140,6 +862,16 @@ function AdminApp(){
       flash(`Erreur publication : ${e?.message||"inconnue"}`,"#c62828");
     }
   };
+
+  const publicationChanged=!!publishedSnapshot && (()=>{
+    if(publishedSnapshot.year!==year)return true;
+    const old=publishedSnapshot.schedules||[];
+    const current=old.map(sc=>allSchedules.find(x=>x.s===sc.s)).filter(Boolean);
+    const slots=list=>list.map(({s,matin,am,nuit,dailySchedules})=>({s,matin,am,nuit,dailySchedules}));
+    return current.length!==old.length || stableSerialize(slots(current))!==stableSerialize(slots(old)) ||
+      stableSerialize([operators.filter(o=>o.active),absences,leaves,satWeeks,satEndPostes,joursChomes,joursAmenages,notes]) !==
+      stableSerialize([publishedSnapshot.operators,publishedSnapshot.absences,publishedSnapshot.leaves,publishedSnapshot.satWeeks,publishedSnapshot.satEndPostes,publishedSnapshot.joursChomes,publishedSnapshot.joursAmenages,publishedSnapshot.notes]);
+  })();
 
   const chipName = n=> showFullNames ? (operators.find(o=>o.short===n)?.full||n) : n;
 
@@ -1155,23 +887,19 @@ function AdminApp(){
 
   // Samedis travaillés par opérateur (S1 → fin de fenêtre). Suivi explicite :
   // c'est souvent là que naît le sentiment d'injustice, plus que sur les nuits.
-  const satCounts = (()=>{
-    const m={}; const shIdx={matin:0,am:1,nuit:2};
-    allSchedules.forEach(sc=>{
-      if(!satWeeks.includes(sc.s)) return;
-      const end={M:0,AM:1,N:2}[satEndPostes[sc.s]||"N"];
-      ["matin","am","nuit"].forEach(k=>{
-        if(shIdx[k]<=end) (sc[k]||[]).forEach(n=>{ m[n]=(m[n]||0)+1; });
-      });
-    });
-    return m;
+  const satCounts=(()=>{
+    const counts={};for(const sc of allSchedules){const slots=daySlots(sc,year,6,absences,leaves,{satWeeks,satEndPostes,joursChomes});for(const n of SHIFTS.flatMap(k=>slots[k]))counts[n]=(counts[n]||0)+1;}return counts;
   })();
 
   const maxEquity = Math.max(...equity.map(e=>e.total),1);
   // Seuil d'imbalance au prorata des semaines de présence de chaque opérateur
   // (un arrivé en S40 n'est pas comparé sur 52 semaines)
   const equityWeeks = startWeek + numWeeks - 1;
-  const imbalance = op => Math.max(op.matin,op.am,op.nuit)-Math.min(op.matin,op.am,op.nuit) > Math.max(op.present||equityWeeks,1) * 0.4;
+  const imbalance = op => {
+    if(op.isVolant||!op.present)return false;
+    const peers=equity.filter(o=>!o.isVolant&&o.present&&isLeader(o)===isLeader(op));
+    return ["matin","am","nuit"].some(key=>op[key]/op.present-Math.min(...peers.map(o=>o[key]/o.present))>0.2);
+  };
 
   // ── IMPRESSION ────────────────────────────────────────────────────────────────
   const printPlanning = ()=>{
@@ -1182,7 +910,7 @@ function AdminApp(){
       return `<tr>
         <td><strong>S${sc.s}</strong>${sc.isOverridden?"&nbsp;✏":""}${hasSat?"&nbsp;🗓":""}
             <br><small>${fmtDate(m)} – ${fmtDate(end)}</small>
-            ${note?`<br><small style="color:#888">${note}</small>`:""}
+            ${note?`<br><small style="color:#888">${note}</small>`:""}${(sc.dailyChanges||[]).map(c=>`<br><small>${c.date} ${c.name}: ${c.from} → ${c.to}</small>`).join("")}
         </td>
         <td style="background:#D6EFD8;color:#1B5E20">${sc.matin.join(", ")||"—"}</td>
         <td style="background:#FFF9C4;color:#F57F17">${sc.am.join(", ")||"—"}</td>
@@ -1205,7 +933,7 @@ function AdminApp(){
       </style>
     </head><body>
       <h1>NEOLITIK — Planning 3×8 · ${year}</h1>
-      <p>S${startWeek}–S${startWeek+numWeeks-1} · Imprimé le ${new Date().toLocaleDateString("fr-FR")}</p>
+      <p>S${startWeek}–S${endWeek} · Imprimé le ${new Date().toLocaleDateString("fr-FR")}</p>
       <button class="no-print" onclick="window.print()" style="margin-bottom:12px;padding:5px 14px;cursor:pointer;border:1px solid #ccc;border-radius:4px;">🖨 Imprimer</button>
       <table>
         <thead><tr>
@@ -1224,50 +952,22 @@ function AdminApp(){
   // Une ligne par opérateur et par semaine, de S1 à la fin de la fenêtre :
   // poste tenu, absences/congés déclarés, samedi travaillé, source (archive/manuel/algo).
   // Compatible Excel français (séparateur ; et BOM UTF-8).
-  const exportCSV = ()=>{
-    if(!allSchedules.length){flash("Aucune donnée à exporter","#c62828");return;}
-    const shiftIdx={matin:0,am:1,nuit:2};
-    const lines=[["Semaine","Dates","Operateur","Niveau","Poste","Absences / Conges","Samedi travaille","Source"].join(";")];
-    allSchedules.forEach(sc=>{
-      const m=getMondayOfWeek(sc.s,year), end=new Date(m); end.setDate(m.getDate()+4);
-      const dates=`${fmtDate(m)} - ${fmtDate(end)}`;
-      const hasSat=satWeeks.includes(sc.s);
-      const satEnd={M:0,AM:1,N:2}[satEndPostes[sc.s]||"N"];
-      operators.forEach(op=>{
-        const assigned=[...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(op.short);
-        // hors fenêtre de présence ou inactif sans affectation → pas de ligne
-        if(op.fromWeek&&sc.s<op.fromWeek&&!assigned) return;
-        if(op.toWeek&&sc.s>op.toWeek&&!assigned) return;
-        if(!op.active&&!assigned) return;
-        let poste="Repos", key=null;
-        if((sc.matin||[]).includes(op.short)){poste="Matin";key="matin";}
-        else if((sc.am||[]).includes(op.short)){poste="AM";key="am";}
-        else if((sc.nuit||[]).includes(op.short)){poste="Nuit";key="nuit";}
-        else if(op.isVolant){poste="Journee";}
-        const ann=[];
-        (absences[sc.s]||[]).forEach(e=>{
-          if(e===op.short) ann.push("Absent (semaine)");
-          else if(e.startsWith(op.short+"|")) ann.push(`Absent ${e.split("|")[2]}`);
-        });
-        (leaves[sc.s]||[]).forEach(e=>{
-          if(e===op.short) ann.push("Conge (semaine)");
-          else if(e.startsWith(op.short+":")){
-            const[,range]=e.split(":");const[sd,ed]=range.split("-").map(Number);
-            ann.push(`Conge ${DAYS_FR[sd]}-${DAYS_FR[ed]}`);
-          }
-        });
-        const sat = hasSat&&key!==null&&shiftIdx[key]<=satEnd ? "Oui":"Non";
-        const source = sc.isArchived?"Archive (fige)":sc.isOverridden?"Ajustement manuel":"Algorithme";
-        lines.push([`S${sc.s}`,dates,op.full,op.level,poste,ann.join(" + "),sat,source].join(";"));
-      });
-    });
-    const blob=new Blob(["\ufeff"+lines.join("\r\n")],{type:"text/csv;charset=utf-8;"});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement("a");
-    a.href=url;
-    a.download=`neolitik-suivi-${year}-S1-S${allSchedules[allSchedules.length-1].s}.csv`;
-    a.click(); URL.revokeObjectURL(url);
-    flash("Export CSV généré — ouvrable dans Excel pour la paie");
+  const exportCSV=()=>{
+    const cells=value=>`"${String(value??"").replaceAll('"','""')}"`;
+    const lines=[["Année ISO","Semaine","Date","Opérateur","Niveau","Poste","Absence / congé","Source"]];
+    for(const sc of allSchedules)for(let day=1;day<=6;day++){
+      if(day===6&&!satWeeks.includes(sc.s))continue;
+      const date=isoDate(dateOfDay(year,sc.s,day)),slots=daySlots(sc,year,day,absences,leaves,{satWeeks,satEndPostes,joursChomes});
+      for(const op of operators){
+        const shift=SHIFTS.find(k=>slots[k].includes(op.short));
+        const absent=absentOnDay(op.short,sc.s,day,absences,leaves);
+        if(!shift&&!absent)continue;
+        lines.push([year,sc.s,date,op.full,op.level,shift||"—",absent?"Absence / congé":"",sc.isArchived?"Archive":dailyOverrides[date]?"Ajustement journalier":sc.dailyChanges?.some(c=>c.date===date&&c.name===op.short)?"Remplacement automatique":sc.isOverridden?"Ajustement hebdomadaire":"Algorithme"]);
+      }
+    }
+    const blob=new Blob(["\ufeff"+lines.map(row=>row.map(cells).join(';')).join('\r\n')],{type:'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob),anchor=document.createElement('a');anchor.href=url;anchor.download=`neolitik-suivi-journalier-${year}.csv`;anchor.click();URL.revokeObjectURL(url);
+    flash("Export journalier généré");
   };
 
   // ── MOTEUR HEURES (récap mensuel paie) ────────────────────────────────────
@@ -1277,87 +977,9 @@ function AdminApp(){
   // partiels), samedis travaillés. Un jour aménagé reste un jour posté normal (7h).
   // Heures sup = au-delà de 35h sur la semaine complète ; pour une semaine à
   // cheval sur deux mois, les HS sont réparties au prorata des heures du mois.
-  const computeMonthHours = (mYear, mMonth)=>{
-    const arc = archive[mYear]||{};
-    const {schedules:full} = buildSchedules(operators, 1, 53, absences, leaves, overrides, arc);
-    const byWeek={}; full.forEach(sc=>{ byWeek[sc.s]=sc; });
-
-    // Heures d'un opérateur un jour donné (offset 0=Lun … 5=Sam) ; null = ne travaille pas
-    const dayHours=(op, sc, offset, dateStr)=>{
-      if(!sc) return null;
-      let key=null;
-      if(sc.matin.includes(op.short)) key="matin";
-      else if(sc.am.includes(op.short)) key="am";
-      else if(sc.nuit.includes(op.short)) key="nuit";
-      if(!key) return null;                                       // pas affecté = repos
-      if(joursChomes[`${sc.s}-${dateStr}`]) return null;          // usine fermée ce jour
-      if(offset===5){                                              // samedi
-        if(!satWeeks.includes(sc.s)) return null;
-        const satEnd={M:0,AM:1,N:2}[satEndPostes[sc.s]||"N"];
-        if({matin:0,am:1,nuit:2}[key] > satEnd) return null;      // poste non travaillé ce samedi
-      }
-      const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][offset];
-      if((absences[sc.s]||[]).includes(`${op.short}|${sc.s}|${dayLabel}`)) return null; // absent ce jour
-      const partialLeave=(leaves[sc.s]||[]).some(e=>{
-        if(!e.startsWith(op.short+":")) return false;
-        const[,range]=e.split(":"); const[sd,ed]=range.split("-").map(Number);
-        return offset+1>=sd && offset+1<=ed;
-      });
-      if(partialLeave) return null;
-      // Jour à horaires aménagés : total inchangé (7h), nuit recalculée d'après le créneau saisi
-      const am=joursAmenages[`${sc.s}-${dateStr}`];
-      const night=(am && typeof am==="object" && am[key]) ? nightHoursForWindow(am[key].s, am[key].e) : NIGHT_HOURS[key];
-      return { total:PAID_HOURS_PER_SHIFT, night };
-    };
-
-    const res={};
-    operators.forEach(op=>{ res[op.short]={op, total:0, night:0, sup:0, days:0, sat:0}; });
-
-    // Semaines touchant le mois — pour chacune on calcule TOUS ses jours (Lun→Sam)
-    // afin de connaître le total hebdo (>35h), en marquant ceux du mois sélectionné.
-    const weeksTouched=new Set();
-    const lastDay=daysInMonth(mYear, mMonth);
-    for(let d=1; d<=lastDay; d++){
-      const date=new Date(mYear, mMonth, d);
-      for(let w=1; w<=53; w++){
-        const mon=getMondayOfWeek(w, mYear);
-        const diff=Math.floor((date-mon)/86400000);
-        if(diff>=0 && diff<=5){ weeksTouched.add(w); break; }
-      }
-    }
-
-    weeksTouched.forEach(w=>{
-      const sc=byWeek[w]; if(!sc) return;
-      const mon=getMondayOfWeek(w, mYear);
-      operators.forEach(op=>{
-        let weekTotal=0, inTotal=0, inNight=0, inDays=0, inSat=0;
-        for(let offset=0; offset<=5; offset++){
-          const date=new Date(mon); date.setDate(mon.getDate()+offset);
-          const h=dayHours(op, sc, offset, fmtDate(date));
-          if(!h) continue;
-          weekTotal+=h.total;
-          if(date.getFullYear()===mYear && date.getMonth()===mMonth){
-            inTotal+=h.total; inNight+=h.night; inDays++;
-            if(offset===5) inSat++;
-          }
-        }
-        if(inTotal===0) return;
-        const supWeek=Math.max(0, weekTotal-WEEKLY_BASE);
-        const supMonth=weekTotal>0 ? supWeek*(inTotal/weekTotal) : 0;
-        const r=res[op.short];
-        r.total+=inTotal; r.night+=inNight; r.sup+=supMonth; r.days+=inDays; r.sat+=inSat;
-      });
-    });
-
-    return operators
-      .map(op=>{ const r=res[op.short]; return {...r, normal:Math.max(0, r.total-r.sup)}; })
-      .filter(r=>r.total>0)
-      .sort((a,b)=> b.total-a.total);
-  };
-
   const monthHours = React.useMemo(
-    ()=> tab==="heures" ? computeMonthHours(hoursYear, hoursMonth) : [],
-    [tab, hoursYear, hoursMonth, operators, absences, leaves, overrides, archive, satWeeks, satEndPostes, joursChomes, joursAmenages]
+    ()=> tab==="heures" ? computeMonthHours(hoursYear,hoursMonth,{operators:operatorRecords,archive,yearStore:annual}) : [],
+    [tab,hoursYear,hoursMonth,operatorRecords,archive,annual]
   );
   const monthTotals = monthHours.reduce((a,r)=>({
     total:a.total+r.total, night:a.night+r.night, sup:a.sup+r.sup, normal:a.normal+r.normal, days:a.days+r.days, sat:a.sat+r.sat,
@@ -1386,12 +1008,15 @@ function AdminApp(){
   };
 
   // ── RENDER ────────────────────────────────────────────────────────────────
+  if(!loaded) return <div style={{padding:32,fontFamily:"sans-serif"}} role="status">{loadError?`Chargement impossible : ${loadError}. Aucune donnée par défaut ne sera enregistrée.`:"Chargement du planning…"}{loadError&&<button onClick={()=>window.location.reload()} style={{marginLeft:12}}>Réessayer</button>}</div>;
+
   return(
     <div style={{fontFamily:"'DM Sans','Outfit',sans-serif",background:"#f7f8fa",minHeight:"100vh"}}>
 
       {/* Flash */}
       {flashMsg&&<div style={{position:"fixed",top:16,right:16,zIndex:9999,background:flashMsg.color,color:"#fff",padding:"10px 20px",borderRadius:8,fontSize:13,fontWeight:600,boxShadow:"0 4px 12px rgba(0,0,0,.2)"}}>{flashMsg.msg}</div>}
 
+      {dayEditor&&schedules.find(sc=>sc.s===dayEditor.week)&&<DayEditor key={`${year}-${dayEditor.week}-${dayEditor.day}`} schedule={schedules.find(sc=>sc.s===dayEditor.week)} day={dayEditor.day} year={year} operators={operators} absences={absences} leaves={leaves} options={{satWeeks,satEndPostes,joursChomes,joursAmenages,locks}} onSave={saveDay} onClose={()=>setDayEditor(null)}/>}
       {/* Modale Publier */}
       {publishModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
@@ -1428,9 +1053,10 @@ function AdminApp(){
                 {window.location.origin}/?view=planning&token={PUBLIC_TOKEN}
               </span>
             </div>
+            {schedules.slice(0,publishNbWeeks).some(sc=>!sc.isArchived&&(sc.issues||[]).some(i=>i.severity==="error"))&&<div role="alert" style={{fontSize:12,color:"#b71c1c",marginBottom:12}}>Publication bloquée : corrige les alertes rouges du planning (chef, binôme ou effectif de nuit).</div>}
             <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
               <button onClick={()=>setPublishModal(false)} style={{padding:"8px 16px",borderRadius:7,border:"1px solid #ccc",background:"#fff",cursor:"pointer",fontSize:13}}>Annuler</button>
-              <button onClick={publish} style={{padding:"8px 20px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>Publier</button>
+              <button disabled={pendingSaves>0 || schedules.slice(0,publishNbWeeks).some(sc=>!sc.isArchived&&(sc.issues||[]).some(i=>i.severity==="error")) || Object.keys(saveErrors).length>0} onClick={publish} style={{padding:"8px 20px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13,fontWeight:600}}>Publier</button>
             </div>
           </div>
         </div>
@@ -1494,7 +1120,7 @@ function AdminApp(){
           <button onClick={()=>setPublishModal(true)} style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",borderRadius:6,cursor:"pointer",padding:"4px 12px",fontSize:12,color:"#fff"}}>
             📢 Publier
           </button>
-          <span style={{fontSize:11,opacity:.7}}>{syncMsg}</span>
+          <span style={{fontSize:11,opacity:.7}}>{Object.keys(saveErrors).length?"Sauvegarde incomplète":pendingSaves?"Enregistrement…":syncMsg}</span>
         </div>
       </div>
 
@@ -1509,6 +1135,10 @@ function AdminApp(){
       </div>
 
       <div style={{padding:"20px 20px 60px",maxWidth:1200,margin:"0 auto"}}>
+        {Object.values(yearArchive).some(sc=>sc.source==="legacy-reconstructed")&&<div style={{padding:12,background:"#fff8e1",fontSize:12,marginBottom:12}}>Certaines semaines anciennes sans archive ni instantané ont été conservées selon l’ancien calcul. Elles restent à rapprocher du planning réellement travaillé avant usage en paie.</div>}
+        {Object.keys(saveErrors).length>0&&<div role="alert" style={{padding:12,background:"#ffebee",color:"#b71c1c",marginBottom:12,borderRadius:8}}>Sauvegarde incomplète : {Object.entries(saveErrors).map(([key,value])=>`${key} — ${value}`).join(" ; ")}. Garde cette page ouverte. <button onClick={()=>{for(const retry of [...failedWrites.current.values()])retry();}}>Réessayer la sauvegarde</button></div>}
+        {publicationChanged&&<div role="status" style={{padding:12,background:"#fff8e1",color:"#805800",marginBottom:12,borderRadius:8}}>Modifications non publiées : l’équipe voit encore le dernier instantané. Clique sur « Publier » après vérification.</div>}
+
 
         {/* ══ PLANNING ══ */}
         {tab==="planning"&&(
@@ -1517,13 +1147,13 @@ function AdminApp(){
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"12px 16px",marginBottom:12,display:"flex",flexWrap:"wrap",gap:10,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <label style={{fontSize:13,color:"#555",fontWeight:500}}>Année</label>
-                <select value={year} onChange={e=>saveYear(Number(e.target.value))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                <select aria-label="Année du planning" value={year} onChange={e=>saveYear(Number(e.target.value))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                   {[2025,2026,2027,2028,2029].map(y=><option key={y}>{y}</option>)}
                 </select>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <label style={{fontSize:13,color:"#555",fontWeight:500}}>Sem. départ</label>
-                <input type="number" min={1} max={52} value={startWeek} onChange={e=>setStartWeek(Number(e.target.value))} style={{width:60,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+                <input type="number" min={1} max={weeksInYear(year)} value={startWeek} onChange={e=>setStartWeek(Math.max(1,Math.min(weeksInYear(year),Number(e.target.value)||1)))} style={{width:60,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 {[3,5,10,15,26].map(n=>(
@@ -1553,10 +1183,13 @@ function AdminApp(){
               </div>
             </div>
 
+            {endWeek-startWeek+1<numWeeks&&<p style={{fontSize:12,color:'#666'}}>Période limitée à la dernière semaine de {year}. Change d’année pour poursuivre le planning.</p>}
+            <WeeklyLocks weeks={weeks} operators={operators} locks={locks} onChange={setAssignmentLock} isLocked={isWeekLocked}/>
+            {view!=="jours"&&schedules.some(sc=>sc.dailyChanges?.length)&&<div style={{marginBottom:12}}>{schedules.filter(sc=>sc.dailyChanges?.length).map(sc=><DailyChanges key={sc.s} schedule={sc}/>)}</div>}
             {/* Réserve volants N4 */}
             {operators.filter(o=>o.active&&o.isVolant).length>0&&(
               <div style={{background:"#fff",borderRadius:10,border:"2px dashed #a5d6a7",padding:"10px 16px",marginBottom:12}}>
-                <div style={{fontSize:12,fontWeight:600,color:BRAND,marginBottom:6}}>🔄 Réserve — Glissez un volant N4 vers un poste</div>
+                <div style={{fontSize:12,fontWeight:600,color:BRAND,marginBottom:6}}>🔄 Réserve — Glissez un volant vers un poste</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                   {operators.filter(o=>o.active&&o.isVolant).map(op=>(
                     <span key={op.id} draggable
@@ -1567,10 +1200,14 @@ function AdminApp(){
                     </span>
                   ))}
                 </div>
-                <div style={{fontSize:11,color:"#888",marginTop:5}}>Glissement ponctuel uniquement. Pour intégrer au cycle : 🔄 Recalculer après placement.</div>
+                <div style={{fontSize:11,color:"#888",marginTop:5}}>Placement conservé pour la semaine ; les rotations suivantes en tiennent compte automatiquement.</div>
               </div>
             )}
 
+            {schedules.some(sc=>(sc.reserve||[]).length>0)&&<div style={{padding:12,background:"#fff",border:"1px solid #ddd",borderRadius:8,marginBottom:12}}>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:6}}>Réserve automatique par semaine — échange possible avec un chef du planning</div>
+              {schedules.filter(sc=>(sc.reserve||[]).length>0).map(sc=><div key={sc.s} style={{fontSize:12}}>S{sc.s} : {(sc.reserve||[]).map(name=><OpChip key={name} name={name} operators={operators} draggable={!isWeekLocked(sc.s)} onDragStart={()=>onDragStart(sc.s,"reserve",name)}/>)}</div>)}
+            </div>}
             {/* Surlignage */}
             <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
               <span style={{fontSize:12,color:"#888"}}>Surligner :</span>
@@ -1590,13 +1227,13 @@ function AdminApp(){
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",padding:"12px 16px",marginBottom:12}}>
               <div style={{fontWeight:600,fontSize:13,marginBottom:8}}>Absence ponctuelle</div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                <select value={absOp} onChange={e=>setAbsOp(e.target.value)} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                <select aria-label="Opérateur absent" value={absOp} onChange={e=>setAbsOp(e.target.value)} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                   <option value="">-- Opérateur --</option>
                   {activeOps.map(o=><option key={o.id} value={o.short}>{o.full}</option>)}
                 </select>
                 <span style={{fontSize:13,color:"#555"}}>S.</span>
-                <input type="number" min={1} max={52} value={absWeek} onChange={e=>setAbsWeek(Number(e.target.value))} style={{width:58,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
-                <select value={absDay} onChange={e=>setAbsDay(Number(e.target.value))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
+                <input aria-label="Semaine de l’absence" type="number" min={1} max={weeksInYear(year)} value={absWeek} onChange={e=>setAbsWeek(Math.max(1,Math.min(weeksInYear(year),Number(e.target.value)||1)))} style={{width:58,padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>
+                <select aria-label="Jour de l’absence" value={absDay} onChange={e=>setAbsDay(Number(e.target.value))} style={{padding:"5px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>
                   <option value={0}>Semaine complète</option>
                   {[1,2,3,4,5].map(d=><option key={d} value={d}>{DAYS_FR[d]}</option>)}
                 </select>
@@ -1619,14 +1256,14 @@ function AdminApp(){
             </div>
 
             {/* Alertes critiques */}
-            {allAlerts.length>0&&(
-              <div style={{background:"#fdecea",border:"1px solid #ef9a9a",borderRadius:8,padding:"10px 14px",marginBottom:10,fontSize:13,color:"#b71c1c"}}>
-                <strong>⚠ Alertes ({allAlerts.length})</strong>
+            {["⛔","⚠"].map(symbol=>{const entries=allAlerts.filter(a=>a.startsWith(symbol));return entries.length>0&&(
+              <div key={symbol} style={{background:symbol==="⛔"?"#fdecea":"#fff8e1",border:`1px solid ${symbol==="⛔"?"#ef9a9a":"#ffe082"}`,borderRadius:8,padding:"10px 14px",marginBottom:10,fontSize:13,color:symbol==="⛔"?"#b71c1c":"#805800"}}>
+                <strong>{symbol} {symbol==="⛔"?"À corriger avant publication":"Points d’attention"} ({entries.length})</strong>
                 <ul style={{margin:"4px 0 0 16px",padding:0}}>
-                  {allAlerts.map((a,i)=><li key={i}>{a}</li>)}
+                  {entries.map((a,i)=><li key={i}>{a}</li>)}
                 </ul>
               </div>
-            )}
+            );})}
             {/* Infos partielles */}
             {allInfos.length>0&&(
               <div style={{background:"#fff8e1",border:"1px solid #ffe082",borderRadius:8,padding:"8px 14px",marginBottom:10,fontSize:12,color:"#f57f17"}}>
@@ -1638,7 +1275,7 @@ function AdminApp(){
             <div style={{fontSize:12,color:"#555",marginBottom:10,background:"#f0f4ff",border:"1px solid #c5cae9",borderRadius:7,padding:"8px 12px"}}>
               💡 <strong>Glissement :</strong> faites glisser un opérateur d'un poste à un autre pour un ajustement ponctuel — marqué ✏.<br/>
               🔁 <strong>Échange :</strong> déposez un opérateur <em>sur</em> un autre opérateur pour échanger leurs postes en un geste (arrangement entre ouvriers).<br/>
-              🔄 <strong>Recalculer :</strong> absorbe tous les ajustements manuels comme nouvelle base et repart de l'algorithme.
+              🔄 <strong>Recalculer :</strong> remplace les ajustements des semaines affichées non archivées. Les semaines antérieures servent de contexte à la rotation.
             </div>
 
             {/* VUE LISTE */}
@@ -1776,208 +1413,7 @@ function AdminApp(){
             )}
 
             {/* VUE JOURS */}
-            {view==="jours"&&(
-              <div style={{overflowX:"auto"}}>
-                <div style={{fontSize:12,color:"#4527A0",marginBottom:10,background:"#EDE7F6",border:"1px solid #d1c4e9",borderRadius:7,padding:"8px 12px"}}>
-                  ⇄ <strong>Jour aménagé :</strong> dans l'en-tête d'un jour, cliquez « aménager » pour fixer des horaires décalés par équipe ce jour-là (ex. Matin 8h–16h, AM 11h–19h, Nuit 14h–22h) afin de créer un chevauchement. Les affectations et le total d'heures (7h/personne) restent inchangés, mais les <strong>heures de nuit sont recalculées</strong> d'après ces horaires (visibles dans l'onglet Heures et sur le lien équipe).
-                </div>
-                {schedules.map(sc=>{
-                  const hasSat=satWeeks.includes(sc.s);
-                  const m=getMondayOfWeek(sc.s,year);
-                  const numDays=hasSat?6:5;
-                  const weekSatEnd=satEndPostes[sc.s]||"N"; // par défaut Nuit si non défini
-                  const satEndIdx={M:0,AM:1,N:2}[weekSatEnd];
-                  const shiftIdx={matin:0,am:1,nuit:2};
-                  const hasAlert=sc.alerts.some(a=>!a.startsWith("ℹ"));
-                  const isCurrent=sc.s===currentWeek;
-                  const locked=isWeekLocked(sc.s);
-
-                  // Jours fériés français fixes + Ascension/Pentecôte approx
-                  const feriesDates=getFeries(year);
-
-                  // Construction des jours
-                  const days=Array.from({length:numDays},(_,d)=>{
-                    const date=new Date(m); date.setDate(m.getDate()+d);
-                    const dateStr=`${String(date.getDate()).padStart(2,"0")}/${String(date.getMonth()+1).padStart(2,"0")}`;
-                    const isFerie=feriesDates.includes(dateStr);
-                    const isSat=d===5;
-                    const isChome=!!joursChomes[`${sc.s}-${dateStr}`];
-                    const amKey=`${sc.s}-${dateStr}`;
-                    const isAmenage=joursAmenages[amKey]!==undefined;
-                    return{d,date,dateStr,isFerie,isSat,isChome,isAmenage,amenage:joursAmenages[amKey]};
-                  });
-
-                  // Opérateurs groupés par poste (libellé court : l'horaire s'affiche par jour)
-                  const groups=[
-                    {key:"matin",label:"🌅 Matin", bg:"#D6EFD8",tc:"#1B5E20"},
-                    {key:"am",   label:"🌆 AM",    bg:"#FFF9C4",tc:"#F57F17"},
-                    {key:"nuit", label:"🌙 Nuit",  bg:"#BBDEFB",tc:"#0D47A1"},
-                  ];
-
-                  // Volants actifs ; en "Journée" on n'affiche que ceux NON affectés
-                  // à un poste cette semaine (sinon doublon) ET non absents/congé
-                  // toute la semaine (sinon ils restent dans le planning à tort).
-                  const volantsList=operators.filter(o=>o.active&&o.isVolant);
-                  const volantFullOut=o=>(absences[sc.s]||[]).includes(o.short)||(leaves[sc.s]||[]).includes(o.short);
-                  const volantsJournee=volantsList.filter(o=>![...(sc.matin||[]),...(sc.am||[]),...(sc.nuit||[])].includes(o.short)&&!volantFullOut(o));
-
-                  return(
-                    <div key={sc.s} style={{background:"#fff",borderRadius:10,border:`1px solid ${hasAlert?"#ef9a9a":isCurrent?BRAND:"#e0e0e0"}`,marginBottom:16,overflow:"hidden"}}>
-                      {/* Header semaine */}
-                      <div style={{background:hasAlert?"#c62828":isCurrent?"#2d4828":BRAND,color:"#fff",padding:"8px 14px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                        <span style={{fontWeight:700,fontSize:14}}>S{sc.s}</span>
-                        {locked&&<span style={{fontSize:10,background:"rgba(255,255,255,.2)",borderRadius:3,padding:"1px 5px"}}>🔒</span>}
-                        {isCurrent&&<span style={{fontSize:10,background:"rgba(255,255,255,.25)",borderRadius:3,padding:"1px 5px"}}>● Now</span>}
-                        {sc.isOverridden&&<span style={{fontSize:10,background:"rgba(255,165,0,.35)",borderRadius:3,padding:"1px 5px"}}>✏</span>}
-                        <span style={{fontSize:12,opacity:.8}}>{fmtDate(m)} – {fmtDate(new Date(m.getTime()+(numDays-1)*86400000))}</span>
-                        {/* Bouton Sam + sélecteur dernier poste par semaine */}
-                        {!locked&&(
-                          <div style={{display:"flex",alignItems:"center",gap:5,marginLeft:"auto"}}>
-                            <button onClick={()=>toggleSat(sc.s)}
-                              style={{fontSize:10,padding:"2px 7px",borderRadius:4,border:"1px solid rgba(255,255,255,.4)",background:hasSat?"rgba(255,255,255,.25)":"transparent",color:"#fff",cursor:"pointer"}}>
-                              {hasSat?"✓ Sam":"+ Sam"}
-                            </button>
-                            {hasSat&&(
-                              <select value={weekSatEnd} onChange={e=>setSatEndForWeek(sc.s,e.target.value)}
-                                style={{fontSize:10,padding:"2px 5px",borderRadius:4,border:"1px solid rgba(255,255,255,.3)",background:"rgba(255,255,255,.1)",color:"#fff",cursor:"pointer"}}>
-                                <option value="M">↳ Matin</option>
-                                <option value="AM">↳ AM</option>
-                                <option value="N">↳ Nuit</option>
-                              </select>
-                            )}
-                          </div>
-                        )}
-                        {locked&&hasSat&&<span style={{fontSize:11,opacity:.7,marginLeft:"auto"}}>Sam. ↳ {weekSatEnd==="M"?"Matin":weekSatEnd==="AM"?"AM":"Nuit"}</span>}
-                        {notes[sc.s]&&<span style={{fontSize:11,opacity:.8}}>{notes[sc.s]}</span>}
-                      </div>
-
-                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                        <thead>
-                          <tr style={{borderBottom:"1px solid #f0f0f0",background:"#fafafa"}}>
-                            <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:11,color:"#666",minWidth:160}}>
-                              Opérateur
-                              <span style={{display:"block",fontSize:9,color:"#bbb",fontWeight:400}}>clic cellule = absent ce jour</span>
-                            </th>
-                            {days.map(({d,dateStr,isFerie,isSat,isChome,isAmenage,amenage})=>(
-                              <th key={d}
-                                onClick={()=>!locked&&toggleJourChome(sc.s,dateStr)}
-                                style={{padding:"6px 8px",textAlign:"center",fontWeight:500,fontSize:11,
-                                  color:isChome?"#888":isSat?"#e65100":"#666",
-                                  background:isChome?"#f5f5f5":isAmenage?"#EDE7F6":isSat?"#fff8f0":"transparent",
-                                  minWidth:80,whiteSpace:"nowrap",
-                                  cursor:locked?"default":"pointer",
-                                  opacity:isChome?0.5:1}}>
-                                {["Lun","Mar","Mer","Jeu","Ven","Sam"][d]}
-                                <span style={{display:"block",fontSize:10,fontWeight:400,opacity:.8}}>
-                                  {dateStr}
-                                  {isFerie&&<span style={{fontSize:9,color:"#888",marginLeft:2}}>Férié</span>}
-                                </span>
-                                {isChome&&<span style={{display:"block",fontSize:9,color:"#888",fontWeight:400}}>Chômé</span>}
-                                {isAmenage&&!isChome&&<span style={{display:"block",fontSize:9,color:"#4527A0",fontWeight:600}}>⇄ Aménagé</span>}
-                                {isAmenage&&!isChome&&<AmenageNote entry={amenage}/>}
-                                {!locked&&!isChome&&(
-                                  <span style={{display:"block",fontSize:8,color:"#ccc",fontWeight:400}}>
-                                    clic = chômer · <span onClick={e=>{e.stopPropagation();openAmenage(sc.s,dateStr,["Lun","Mar","Mer","Jeu","Ven","Sam"][d]);}} style={{color:"#7E57C2",cursor:"pointer",textDecoration:"underline"}}>{isAmenage?"modifier horaires":"aménager"}</span>
-                                  </span>
-                                )}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {groups.map(({key,label,bg,tc})=>{
-                            const opsInShift=sc[key]||[];
-                            if(!opsInShift.length) return null;
-                            return(
-                              <React.Fragment key={key}>
-                                <tr>
-                                  <td style={{padding:"3px 10px",background:bg,fontSize:10,fontWeight:700,color:tc,letterSpacing:.3,whiteSpace:"nowrap"}}>{label}</td>
-                                  {days.map(({d,dateStr,isChome,amenage})=>(
-                                    <td key={d} style={{padding:"3px 6px",background:bg,fontSize:10,fontWeight:600,color:tc,textAlign:"center",whiteSpace:"nowrap",opacity:isChome?0.4:1}}>
-                                      {shiftHoursLabel(key, amenage)}
-                                    </td>
-                                  ))}
-                                </tr>
-                                {opsInShift.map(short=>{
-                                  const op=operators.find(o=>o.short===short);
-                                  const lv=LEVEL_BADGE[op?.level||"N1"];
-                                  return(
-                                    <tr key={short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
-                                      <td style={{padding:"5px 10px",whiteSpace:"nowrap"}}>
-                                        <span style={{fontWeight:500}}>{showFullNames?(op?.full||short):short}</span>
-                                        <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op?.level||"N1"}</span>
-                                      </td>
-                                      {days.map(({d,isSat,isChome,dateStr})=>{
-                                        const isOff=isSat&&shiftIdx[key]>satEndIdx;
-                                        const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
-                                        const absKey=`${short}|${sc.s}|${dayLabel}`;
-                                        const isAbsent=(absences[sc.s]||[]).includes(absKey);
-                                        const chipBg=isOff||isChome||isAbsent?"#f5f5f5":bg;
-                                        const chipTc=isOff||isChome||isAbsent?"#bbb":tc;
-                                        const postLabel=key==="matin"?"M":key==="am"?"AM":"N";
-                                        return(
-                                          <td key={d}
-                                            onClick={()=>!isOff&&!isChome&&toggleAbsJour(sc.s,short,dateStr,dayLabel)}
-                                            style={{padding:"4px 6px",textAlign:"center",
-                                              background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent",
-                                              cursor:isOff||isChome?"default":"pointer"}}>
-                                            <span style={{background:chipBg,color:chipTc,borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
-                                              {isOff||isChome||isAbsent?"—":postLabel}
-                                            </span>
-                                            {isAbsent&&!isChome&&!isOff&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
-                                          </td>
-                                        );
-                                      })}
-                                    </tr>
-                                  );
-                                })}
-                              </React.Fragment>
-                            );
-                          })}
-
-                          {/* Volants en journée — uniquement ceux NON affectés à un poste cette semaine */}
-                          {volantsJournee.length>0&&(
-                            <>
-                              <tr>
-                                <td colSpan={numDays+1} style={{padding:"3px 10px",background:"#EDE7F6",fontSize:10,fontWeight:600,color:"#4527A0",letterSpacing:.3}}>☀️ Journée</td>
-                              </tr>
-                              {volantsJournee.map(op=>{
-                                const lv=LEVEL_BADGE[op.level||"N1"];
-                                return(
-                                  <tr key={op.short} style={{borderBottom:"0.5px solid #f5f5f5"}}>
-                                    <td style={{padding:"5px 10px",whiteSpace:"nowrap"}}>
-                                      <span style={{fontWeight:500}}>{showFullNames?op.full:op.short}</span>
-                                      <span style={{background:lv.bg,color:lv.color,borderRadius:3,padding:"1px 4px",fontSize:9,fontWeight:600,marginLeft:4}}>{op.level}</span>
-                                    </td>
-                                    {days.map(({d,isSat,isChome,dateStr})=>{
-                                      const dayLabel=["Lun","Mar","Mer","Jeu","Ven","Sam"][d];
-                                      const absKey=`${op.short}|${sc.s}|${dayLabel}`;
-                                      const isAbsent=(absences[sc.s]||[]).includes(absKey);
-                                      return(
-                                        <td key={d}
-                                          onClick={()=>!isChome&&toggleAbsJour(sc.s,op.short,dateStr,dayLabel)}
-                                          style={{padding:"4px 6px",textAlign:"center",
-                                            background:isChome?"#f9f9f9":isSat?"#fffdf5":"transparent",
-                                            cursor:isChome?"default":"pointer"}}>
-                                          <span style={{background:isChome||isAbsent?"#f5f5f5":"#EDE7F6",color:isChome||isAbsent?"#bbb":"#4527A0",borderRadius:3,padding:"2px 6px",fontSize:11,fontWeight:500,display:"inline-block"}}>
-                                            {isChome||isAbsent?"—":"J"}
-                                          </span>
-                                          {isAbsent&&!isChome&&<span style={{display:"block",fontSize:8,color:"#bbb"}}>absent</span>}
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                );
-                              })}
-                            </>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            {view==="jours"&&<DailyPlanning schedules={schedules} operators={operators} year={year} absences={absences} leaves={leaves} satWeeks={satWeeks} satEndPostes={satEndPostes} joursChomes={joursChomes} joursAmenages={joursAmenages} notes={notes} showFullNames={showFullNames} onAbsence={toggleAbsJour} onClosed={toggleJourChome} onHours={openAmenage} onEditDay={(sc,day)=>setDayEditor({week:sc.s,day})} onToggleSat={toggleSat} onSatEnd={setSatEndForWeek} isLocked={isWeekLocked}/>}
           </div>
         )}
 
@@ -1990,9 +1426,9 @@ function AdminApp(){
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
                 {[
                   {label:"Opérateur",el:<select value={leaveOp} onChange={e=>setLeaveOp(e.target.value)} style={{padding:"6px 10px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}><option value="">-- Choisir --</option>{activeOps.map(o=><option key={o.id} value={o.short}>{o.full}</option>)}</select>},
-                  {label:"Sem. début",el:<input type="number" min={1} max={52} value={leaveFrom} onChange={e=>setLeaveFrom(Number(e.target.value))} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>},
+                  {label:"Sem. début",el:<input type="number" min={1} max={53} value={leaveFrom} onChange={e=>setLeaveFrom(Number(e.target.value))} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>},
                   {label:"Jour début",el:<select value={leaveFromDay} onChange={e=>setLeaveFromDay(Number(e.target.value))} style={{padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>{[1,2,3,4,5].map(d=><option key={d} value={d}>{DAYS_FR[d]}</option>)}</select>},
-                  {label:"Sem. fin",el:<input type="number" min={1} max={52} value={leaveTo} onChange={e=>setLeaveTo(Number(e.target.value))} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>},
+                  {label:"Sem. fin",el:<input type="number" min={1} max={53} value={leaveTo} onChange={e=>setLeaveTo(Number(e.target.value))} style={{width:70,padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}/>},
                   {label:"Jour fin",el:<select value={leaveToDay} onChange={e=>setLeaveToDay(Number(e.target.value))} style={{padding:"6px 8px",borderRadius:6,border:"1px solid #ccc",fontSize:13}}>{[1,2,3,4,5].map(d=><option key={d} value={d}>{DAYS_FR[d]}</option>)}</select>},
                 ].map(({label,el})=>(
                   <div key={label}><div style={{fontSize:12,color:"#666",marginBottom:4}}>{label}</div>{el}</div>
@@ -2125,8 +1561,8 @@ function AdminApp(){
         {/* ══ ÉQUITÉ ══ */}
         {tab==="equite"&&(
           <div>
-            <div style={{fontWeight:600,fontSize:15,marginBottom:4}}>Équité — cumul S1 → S{startWeek+numWeeks-1} ({year})</div>
-            <div style={{fontSize:12,color:"#888",marginBottom:14}}>Stats annuelles depuis la semaine 1 — base objective pour l'algorithme de rotation.</div>
+            <div style={{fontWeight:600,fontSize:15,marginBottom:4}}>Équité — cumul S1 → S{endWeek} ({year})</div>
+            <div style={{fontSize:12,color:"#888",marginBottom:14}}>Comparaison entre opérateurs de même rôle (chef ou équipier), au prorata des semaines disponibles. Les binômes peuvent limiter l’équilibrage.</div>
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden"}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
                 <thead>
@@ -2264,7 +1700,7 @@ function AdminApp(){
         {/* ══ TIMELINE ══ */}
         {tab==="timeline"&&(
           <div>
-            <div style={{fontWeight:600,fontSize:15,marginBottom:4}}>Timeline par opérateur — S{startWeek} à S{startWeek+numWeeks-1} ({year})</div>
+            <div style={{fontWeight:600,fontSize:15,marginBottom:4}}>Timeline par opérateur — S{startWeek} à S{endWeek} ({year})</div>
             <div style={{fontSize:12,color:"#888",marginBottom:14}}>Vue synthétique de la rotation : identifiez les séquences, les absences et les déséquilibres d'un coup d'œil.</div>
 
             {/* Légende */}
@@ -2412,8 +1848,9 @@ function AdminApp(){
               <button onClick={()=>setShowAddOp(!showAddOp)} style={{padding:"6px 14px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>+ Ajouter</button>
             </div>
             <div style={{background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:7,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#2e7d32"}}>
-              ℹ️ Tout opérateur actif est intégré automatiquement à l'algorithme. Avec 4 N4 actifs, l'algo tourne sur les 4 et laisse l'un d'eux en repos chaque semaine — il prend le relais dès qu'un autre est absent. Utilisez "Passer volant" pour exclure un opérateur du planning auto (glissement manuel uniquement).
-              <br/>👋 <strong>Arrivée / Départ</strong> : renseignez la semaine d'embauche ou de fin de contrat — l'opérateur n'est planifié que sur sa période, et sa charge est équilibrée au prorata de sa présence. Les semaines écoulées sont archivées : un départ ne réécrit jamais l'historique (paie fiable). Préférez "Départ S" à la suppression 🗑 pour garder la trace.
+              ★ Le rôle de chef est indépendant du niveau : exactement un chef par poste, au moins trois personnes en nuit. Un chef supplémentaire tourne en réserve avec son éventuel binôme. Les volants restent à placer manuellement.
+              <br/>🔗 Un binôme reste dans le même poste quand ses deux membres sont présents. Si l'un est absent, l'autre travaille normalement. Le glissement et l'échange déplacent le binôme entier. Deux chefs ne peuvent pas être liés.
+              <br/>👋 <strong>Arrivée / Départ</strong> : renseignez la semaine d'embauche ou de fin de contrat — l'opérateur n'est planifié que sur sa période, et sa charge est équilibrée au prorata de sa présence. Les semaines écoulées sont archivées : un départ ne réécrit jamais l'historique (paie fiable). Les dates de contrat sont rattachées à l’année affichée. Préférez "Départ S" à la suppression 🗑 pour garder la trace.
             </div>
             {activeOps.length<8&&(
               <div style={{background:"#fff8e1",border:"1px solid #ffe082",borderRadius:7,padding:"8px 12px",marginBottom:14,fontSize:12,color:"#f57f17"}}>
@@ -2434,13 +1871,14 @@ function AdminApp(){
                     {["N1","N2","N3","N4"].map(l=><option key={l}>{l}</option>)}
                   </select>
                 </div>
+                <label style={{fontSize:12}}><input type="checkbox" checked={newOp.isLeader} onChange={e=>setNewOp({...newOp,isLeader:e.target.checked})}/> Chef d’équipe</label>
                 <button onClick={addOperator} style={{padding:"7px 16px",borderRadius:7,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontSize:13}}>Enregistrer</button>
                 <button onClick={()=>setShowAddOp(false)} style={{padding:"7px 14px",borderRadius:7,background:"#fff",color:"#333",border:"1px solid #ccc",cursor:"pointer",fontSize:13}}>Annuler</button>
               </div>
             )}
             <div style={{background:"#fff",borderRadius:10,border:"1px solid #e0e0e0",overflow:"hidden"}}>
               {operators.map((op,i)=>(
-                <div key={op.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",borderBottom:i<operators.length-1?"1px solid #f0f0f0":"none",opacity:op.active?1:.5}}>
+                <div key={op.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",gap:12,flexWrap:"wrap",borderBottom:i<operators.length-1?"1px solid #f0f0f0":"none",opacity:op.active?1:.5}}>
                   <div style={{display:"flex",alignItems:"center",gap:10}}>
                     <div style={{width:36,height:36,borderRadius:"50%",background:LEVEL_BADGE[op.level].bg,color:LEVEL_BADGE[op.level].color,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:12}}>
                       {op.full.split(" ").map(w=>w[0]).slice(0,2).join("")}
@@ -2453,22 +1891,29 @@ function AdminApp(){
                       </div>
                     </div>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                     {/* Fenêtre de présence : arrivée/départ en cours d'année.
                         Vide = présent toute l'année. L'algo n'affecte l'opérateur
                         que sur ses semaines de présence, et l'équité est calculée
                         au prorata (un arrivant en S40 n'est pas surchargé). */}
                     <div style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"#888"}}>
                       <span title="Première semaine travaillée (vide = depuis S1)">Arrivée S</span>
-                      <input type="number" min={1} max={52} value={op.fromWeek||""} placeholder="1"
-                        onChange={e=>saveOperators(operators.map(o=>o.id===op.id?{...o,fromWeek:e.target.value?Number(e.target.value):undefined}:o))}
+                      <input type="number" min={1} max={53} value={op.fromWeek||""} placeholder="1"
+                        onChange={e=>updateOperator(op.id,{fromWeek:e.target.value?Number(e.target.value):undefined})}
                         style={{width:46,padding:"3px 5px",borderRadius:5,border:"1px solid #ddd",fontSize:11}}/>
                       <span title="Dernière semaine travaillée (vide = jusqu'à S52)">Départ S</span>
-                      <input type="number" min={1} max={52} value={op.toWeek||""} placeholder="52"
-                        onChange={e=>saveOperators(operators.map(o=>o.id===op.id?{...o,toWeek:e.target.value?Number(e.target.value):undefined}:o))}
+                      <input type="number" min={1} max={53} value={op.toWeek||""} placeholder="52"
+                        onChange={e=>updateOperator(op.id,{toWeek:e.target.value?Number(e.target.value):undefined})}
                         style={{width:46,padding:"3px 5px",borderRadius:5,border:"1px solid #ddd",fontSize:11}}/>
                     </div>
-                    <LevelBadge level={op.level}/>
+                    <select aria-label={`Niveau de ${op.short}`} value={op.level} onChange={e=>updateOperator(op.id,{level:e.target.value})} style={{padding:5,borderRadius:5,border:"1px solid #ccc"}}>
+                      {["N1","N2","N3","N4"].map(level=><option key={level}>{level}</option>)}
+                    </select>
+                    <label style={{fontSize:12,whiteSpace:"nowrap"}}><input aria-label={`Chef d’équipe ${op.short}`} type="checkbox" checked={isLeader(op)} onChange={e=>updateOperator(op.id,{isLeader:e.target.checked})}/> ★ Chef</label>
+                    <select aria-label={`Binôme de ${op.short}`} value={op.partnerId||""} onChange={e=>setPartner(op.id,e.target.value)} style={{padding:5,borderRadius:5,border:"1px solid #ccc",maxWidth:165}}>
+                      <option value="">Sans binôme</option>
+                      {operators.filter(o=>o.id!==op.id).map(o=><option key={o.id} value={o.id} disabled={(isLeader(op)&&isLeader(o)) || !!op.isVolant!==!!o.isVolant}>{o.short}{o.partnerId&&o.partnerId!==op.id?" (réaffecter)":""}</option>)}
+                    </select>
                     <button onClick={()=>toggleVolant(op.id)}
                       style={{padding:"4px 12px",borderRadius:6,border:`1px solid ${op.isVolant?"#a5d6a7":"#ccc"}`,background:op.isVolant?"#e8f5e9":"#fff",cursor:"pointer",fontSize:12,color:op.isVolant?"#2e7d32":"#555"}}
                       title={op.isVolant?"Retirer du mode volant (réintégrer au planning automatique)":"Passer en volant (exclu du planning auto, glissement manuel uniquement)"}>

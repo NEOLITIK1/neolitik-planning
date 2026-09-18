@@ -1,0 +1,519 @@
+import {buildSchedules} from '../src/scheduler.js';
+import {nightHoursForShift,daysInMonth,nightHoursForWindow,PAID_HOURS_PER_SHIFT,WEEKLY_BASE} from '../src/payroll.js';
+export function runRegression() {
+const OPS_8 = [
+  {id:"martin",   full:"Maxime MARTIN",     short:"MARTIN",   level:"N4",active:true,isVolant:false},
+  {id:"lendormy", full:"Matthieu LENDORMY", short:"LENDORMY", level:"N4",active:true,isVolant:false},
+  {id:"gibeaux",  full:"Théo GIBEAUX",      short:"GIBEAUX",  level:"N4",active:true,isVolant:false},
+  {id:"hebert",   full:"Maxime HEBERT",     short:"HEBERT",   level:"N3",active:true,isVolant:false},
+  {id:"bruny",    full:"Julien BRUNY",      short:"BRUNY",    level:"N2",active:true,isVolant:false},
+  {id:"vallet",   full:"Kévin VALLET",      short:"VALLET",   level:"N1",active:true,isVolant:false},
+  {id:"cadinot",  full:"Thomas CADINOT",    short:"CADINOT",  level:"N1",active:true,isVolant:false},
+  {id:"allain",   full:"Jason ALLAIN",      short:"ALLAIN",   level:"N1",active:true,isVolant:false},
+];
+
+const OPS_9 = [...OPS_8, {id:"lecourt",full:"Yann LECOURT",short:"LECOURT",level:"N4",active:true,isVolant:false}];
+
+const OPS_VOLANT = OPS_8.map(o=>({...o}));
+OPS_VOLANT.push({id:"lecourt",full:"Yann LECOURT",short:"LECOURT",level:"N4",active:true,isVolant:true});
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+const results=[];
+function section(title) {}
+function assert(name,condition,detail="") {results.push({name,pass:!!condition,detail});}
+
+function getN4(sc, shift, ops) {
+  return sc[shift].filter(n => ops.find(o=>o.short===n&&o.level==="N4"));
+}
+
+function hasConsecNuit(schedules) {
+  for(let i=1;i<schedules.length;i++){
+    const prev = schedules[i-1].nuit;
+    const cur = schedules[i].nuit;
+    const overlap = cur.filter(n=>prev.includes(n));
+    if(overlap.length>0 && !schedules[i].isOverridden) return overlap;
+  }
+  return null;
+}
+
+function hasConsecShift(schedules, shift) {
+  let maxConsec = {};
+  let curConsec = {};
+  for(let i=0;i<schedules.length;i++){
+    const ops = schedules[i][shift];
+    const newConsec = {};
+    ops.forEach(o=>{
+      newConsec[o] = (curConsec[o]||0)+1;
+      if(!maxConsec[o] || newConsec[o]>maxConsec[o]) maxConsec[o]=newConsec[o];
+    });
+    curConsec = newConsec;
+  }
+  return maxConsec;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// TESTS
+// ════════════════════════════════════════════════════════════════════════
+
+// ── 1. CONFIG STANDARD 8 ops, 15 semaines ────────────────────────────
+section("1. Config standard — 8 opérateurs, 15 semaines");
+{
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 15, {}, {}, {});
+
+  // 1a. Toujours 1 N4 par poste
+  const allN4ok = sc.every(s =>
+    getN4(s,"matin",OPS_8).length>=1 &&
+    getN4(s,"am",OPS_8).length>=1 &&
+    getN4(s,"nuit",OPS_8).length>=1
+  );
+  assert("1 N4 par poste (matin/AM/nuit) — chaque semaine", allN4ok);
+
+  // 1b. Toujours 3 en nuit
+  const allNuit3 = sc.every(s => s.nuit.length === 3);
+  assert("Toujours 3 personnes en nuit", allNuit3);
+
+  // 1c. Jamais 2 nuits consécutives
+  const consec = hasConsecNuit(sc);
+  assert("Jamais 2 nuits consécutives", !consec, consec ? consec.join(",") : "");
+
+  // 1d. Anti-consécutif Matin N4
+  const matConsec = hasConsecShift(sc, "matin");
+  const n4MatMax = Math.max(...OPS_8.filter(o=>o.level==="N4").map(o=>matConsec[o.short]||0));
+  assert("N4 : max 2 Matins consécutifs (anti-consécutif)", n4MatMax <= 2, `max=${n4MatMax}`);
+
+  // 1e. Anti-consécutif AM N4
+  const amConsec = hasConsecShift(sc, "am");
+  const n4AmMax = Math.max(...OPS_8.filter(o=>o.level==="N4").map(o=>amConsec[o.short]||0));
+  assert("N4 : max 2 AM consécutifs (anti-consécutif)", n4AmMax <= 2, `max=${n4AmMax}`);
+
+  // 1f. Aucun opérateur en double la même semaine
+  const noDup = sc.every(s => {
+    const all = [...s.matin,...s.am,...s.nuit];
+    return new Set(all).size === all.length;
+  });
+  assert("Aucun opérateur en double dans la même semaine", noDup);
+
+  // 1g. Tous les actifs non-volants sont assignés chaque semaine
+  const allAssigned = sc.every(s => {
+    const all = new Set([...s.matin,...s.am,...s.nuit]);
+    return OPS_8.filter(o=>o.active&&!o.isVolant).every(o=>all.has(o.short));
+  });
+  assert("Tous les 8 opérateurs assignés chaque semaine", allAssigned);
+
+  // 1h. Pas d'alertes critiques
+  const critAlerts = sc.flatMap(s=>s.alerts).filter(a=>!a.startsWith("ℹ"));
+  assert("Aucune alerte critique", critAlerts.length===0, critAlerts.join(", "));
+}
+
+// ── 2. CONFIG 9 ops (4 N4) ───────────────────────────────────────────
+section("2. Config 9 opérateurs — 4 N4 actifs, 15 semaines");
+{
+  const {schedules:sc, nightCount, matCount, amCount} = buildSchedules(OPS_9, 1, 15, {}, {}, {});
+
+  const allN4ok = sc.every(s =>
+    getN4(s,"matin",OPS_9).length>=1 &&
+    getN4(s,"am",OPS_9).length>=1 &&
+    getN4(s,"nuit",OPS_9).length>=1
+  );
+  assert("1 N4 par poste même avec 4 N4", allN4ok);
+
+  const allNuit3 = sc.every(s => s.nuit.length === 3);
+  assert("Toujours 3 en nuit", allNuit3);
+
+  const consec = hasConsecNuit(sc);
+  assert("Jamais 2 nuits consécutives", !consec);
+
+  // 4ème N4 : vérifier qu'il tourne (pas toujours en repos)
+  const n4ops = OPS_9.filter(o=>o.level==="N4");
+  const n4totals = n4ops.map(o => (nightCount[o.short]||0)+(matCount[o.short]||0)+(amCount[o.short]||0));
+  const minN4 = Math.min(...n4totals);
+  const maxN4 = Math.max(...n4totals);
+  assert("4 N4 tournent équitablement (écart max ≤ 3)", maxN4 - minN4 <= 3, `min=${minN4} max=${maxN4}`);
+
+  const noDup = sc.every(s => {
+    const all = [...s.matin,...s.am,...s.nuit];
+    return new Set(all).size === all.length;
+  });
+  assert("Aucun doublon", noDup);
+}
+
+// ── 3. CONGÉS — 1 N4 absent 3 semaines ──────────────────────────────
+section("3. Congés — MARTIN absent S5-S7");
+{
+  const leaves = { 5: ["MARTIN"], 6: ["MARTIN"], 7: ["MARTIN"] };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 10, {}, leaves, {});
+
+  const martinAbsent = [5,6,7].every(w => {
+    const s = sc.find(x=>x.s===w);
+    return !s.matin.includes("MARTIN") && !s.am.includes("MARTIN") && !s.nuit.includes("MARTIN");
+  });
+  assert("MARTIN absent de S5-S7", martinAbsent);
+
+  // Avec 2 N4 restants → seulement 2 postes couverts (normal), alerte sur le 3ème
+  const n4countDuringLeave = [5,6,7].map(w => {
+    const s = sc.find(x=>x.s===w);
+    return getN4(s,"matin",OPS_8).length + getN4(s,"am",OPS_8).length + getN4(s,"nuit",OPS_8).length;
+  });
+  assert("2 N4 restants → couvrent au moins 2 postes sur 3", n4countDuringLeave.every(c=>c>=2),
+    `S5=${n4countDuringLeave[0]}, S6=${n4countDuringLeave[1]}, S7=${n4countDuringLeave[2]}`);
+
+  const hasN4Alert = [5,6,7].every(w => {
+    const s = sc.find(x=>x.s===w);
+    return s.alerts.some(a=>a.includes("chef(s)"));
+  });
+  assert("Alerte N4 manquant générée pendant congé MARTIN", hasN4Alert);
+
+  const consec = hasConsecNuit(sc);
+  assert("Pas de nuit consécutive malgré l'absence", !consec);
+}
+
+// ── 4. CONGÉS — 2 N4 absents (stress test) ──────────────────────────
+section("4. Congés — MARTIN + LENDORMY absents S5 (stress)");
+{
+  const leaves = { 5: ["MARTIN","LENDORMY"] };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 8, {}, leaves, {});
+  const s5 = sc.find(x=>x.s===5);
+
+  assert("S5 : au moins 1 N4 quelque part (GIBEAUX)",
+    getN4(s5,"nuit",OPS_8).length+getN4(s5,"am",OPS_8).length+getN4(s5,"matin",OPS_8).length >= 1);
+  assert("S5 : alertes N4 manquant générées", s5.alerts.some(a=>a.includes("chef(s)")));
+}
+
+// ── 5. ABSENCES PONCTUELLES ──────────────────────────────────────────
+section("5. Absences ponctuelles");
+{
+  const abs = { 3: ["HEBERT", "BRUNY|3|Mer"] };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 5, abs, {}, {});
+  const s3 = sc.find(x=>x.s===3);
+
+  const hebertAbsent = !s3.matin.includes("HEBERT") && !s3.am.includes("HEBERT") && !s3.nuit.includes("HEBERT");
+  assert("HEBERT absent semaine complète S3", hebertAbsent);
+
+  const brunyPresent = s3.matin.includes("BRUNY") || s3.am.includes("BRUNY") || s3.nuit.includes("BRUNY");
+  assert("BRUNY (absence jour uniquement) reste dans l'algo S3", brunyPresent);
+
+  assert("Alerte ℹ pour BRUNY absent Mer", s3.alerts.some(a=>a.includes("BRUNY absent le Mer")));
+}
+
+// ── 6. CONGÉS PARTIELS ───────────────────────────────────────────────
+section("6. Congés partiels");
+{
+  const leaves = { 3: ["VALLET:1-3"] };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 5, {}, leaves, {});
+  const s3 = sc.find(x=>x.s===3);
+
+  const valletPresent = s3.matin.includes("VALLET") || s3.am.includes("VALLET") || s3.nuit.includes("VALLET");
+  assert("VALLET (congé partiel Lun-Mer) reste dans l'algo", valletPresent);
+  assert("Alerte ℹ congé partiel VALLET", s3.alerts.some(a=>a.includes("VALLET en congé")));
+}
+
+// ── 7. VOLANT EXCLU DE L'ALGO ────────────────────────────────────────
+section("7. Volant N4 — exclu de l'algo auto");
+{
+  const {schedules:sc} = buildSchedules(OPS_VOLANT, 1, 5, {}, {}, {});
+
+  const lecourtNeverAssigned = sc.every(s =>
+    !s.matin.includes("LECOURT") && !s.am.includes("LECOURT") && !s.nuit.includes("LECOURT")
+  );
+  assert("LECOURT (volant) jamais assigné par l'algo", lecourtNeverAssigned);
+}
+
+// ── 8. OVERRIDE MANUEL ───────────────────────────────────────────────
+section("8. Overrides manuels — validation et continuité");
+{
+  const ov = {
+    3: { matin:["LENDORMY","CADINOT","ALLAIN"], am:["GIBEAUX","HEBERT","BRUNY"], nuit:["MARTIN","VALLET","CADINOT"] }
+  };
+  // Note : CADINOT est en double (matin + nuit) — c'est un test de validation
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 6, {}, {}, ov);
+  const s3 = sc.find(x=>x.s===3);
+  const s4 = sc.find(x=>x.s===4);
+
+  assert("S3 est un override", s3.isOverridden === true);
+  assert("S4 n'est PAS un override", s4.isOverridden === false);
+
+  // S4 doit respecter prevNuit de l'override S3
+  const martinInNuitS4 = s4.nuit.includes("MARTIN");
+  assert("S4 : MARTIN PAS en nuit (était en nuit S3 override)", !martinInNuitS4);
+}
+
+// ── 9. OVERRIDE — alerte N4 manquant ─────────────────────────────────
+section("9. Override sans N4 — alertes");
+{
+  const ov = {
+    2: { matin:["HEBERT","BRUNY","ALLAIN"], am:["VALLET","CADINOT"], nuit:["ALLAIN","BRUNY","HEBERT"] }
+  };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 3, {}, {}, ov);
+  const s2 = sc.find(x=>x.s===2);
+
+  assert("Override sans N4 → alerte no-n4-nuit", s2.alerts.some(a=>a.includes("Nuit — 0 chef(s)")));
+  assert("Override sans N4 → alerte no-n4-am", s2.alerts.some(a=>a.includes("AM — 0 chef(s)")));
+  assert("Override sans N4 → alerte no-n4-matin", s2.alerts.some(a=>a.includes("Matin — 0 chef(s)")));
+}
+
+// ── 10. OVERRIDE — nuit consécutive détectée ─────────────────────────
+section("10. Override — nuit consécutive entre S2 et S3");
+{
+  // S2 auto → S3 override avec un gars de la nuit S2
+  const {schedules:scBase} = buildSchedules(OPS_8, 1, 3, {}, {}, {});
+  const nuitS2 = scBase.find(x=>x.s===2).nuit;
+
+  const ov = {2:scBase[1],3:scBase[1]};
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 4, {}, {}, ov);
+  const s3 = sc.find(x=>x.s===3);
+
+  assert("Alerte nuit consécutive sur override S3", s3.alerts.some(a=>a.includes("Nuits consécutives")),
+    `nuitS2=${nuitS2}, nuitS3=${s3.nuit}, alerts=${s3.alerts}`);
+}
+
+// ── 11. RECALCUL DEPUIS STARTWEEK — overrides comme base ─────────────
+section("11. Recalcul depuis startWeek — override S3 sert de base pour S4+");
+{
+  const ov = {
+    3: { matin:["GIBEAUX","CADINOT","ALLAIN"], am:["MARTIN","HEBERT","BRUNY"], nuit:["LENDORMY","VALLET","ALLAIN"] }
+  };
+  // Simuler recompute : buildSchedules(ops, 1, displayEnd=6, abs, leaves, overrides)
+  // avec overrides uniquement AVANT startWeek=4
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 6, {}, {}, ov);
+  const s4 = sc.find(x=>x.s===4);
+
+  // LENDORMY était en nuit S3 → ne doit PAS être en nuit S4
+  assert("S4 : LENDORMY pas en nuit (anti-consécutif depuis override S3)", !s4.nuit.includes("LENDORMY"));
+  // GIBEAUX était en Matin S3 → swap devrait l'éviter en Matin S4
+  // (peut pas toujours être garanti avec 3 N4, mais vérifions)
+  assert("S4 : l'algo tourne bien après un override", s4.matin.length >= 2 && s4.nuit.length === 3);
+}
+
+// ── 12. ÉQUITÉ SUR 26 SEMAINES ───────────────────────────────────────
+section("12. Équité — 26 semaines, aucun déséquilibre grave");
+{
+  const {nightCount, matCount, amCount} = buildSchedules(OPS_8, 1, 26, {}, {}, {});
+  const active = OPS_8.filter(o=>o.active&&!o.isVolant);
+
+  const nuits = active.map(o=>nightCount[o.short]);
+  const mats = active.map(o=>matCount[o.short]);
+  const ams = active.map(o=>amCount[o.short]);
+
+  const nuitSpread = Math.max(...nuits)-Math.min(...nuits);
+  const matSpread = Math.max(...mats)-Math.min(...mats);
+  const amSpread = Math.max(...ams)-Math.min(...ams);
+
+  assert(`Nuit : écart max ≤ 3 sur 26 sem (écart=${nuitSpread})`, nuitSpread<=3);
+  assert(`Matin : écart max ≤ 4 sur 26 sem (écart=${matSpread})`, matSpread<=4);
+  assert(`AM : écart max ≤ 4 sur 26 sem (écart=${amSpread})`, amSpread<=4);
+}
+
+// ── 13. ROTATION N4 sur 12 semaines — pas de 3+ matins de suite ──────
+section("13. Rotation N4 — max 2 consécutifs par poste sur 12 sem");
+{
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 12, {}, {}, {});
+  const n4ops = OPS_8.filter(o=>o.level==="N4");
+
+  for(const shift of ["matin","am","nuit"]){
+    const consec = hasConsecShift(sc, shift);
+    const maxN4Consec = Math.max(...n4ops.map(o=>consec[o.short]||0));
+    const limit = shift==="nuit" ? 1 : 2;
+    assert(`N4 ${shift} : max ${limit} consécutif(s) (trouvé=${maxN4Consec})`, maxN4Consec<=limit);
+  }
+}
+
+// ── 14. EFFECTIF RÉDUIT — 6 opérateurs (1 inactif + 1 supprimé) ─────
+section("14. Effectif réduit — 6 opérateurs actifs");
+{
+  const ops6 = OPS_8.map(o=>({...o}));
+  ops6.find(o=>o.short==="ALLAIN").active = false;
+  ops6.find(o=>o.short==="CADINOT").active = false;
+
+  const {schedules:sc} = buildSchedules(ops6, 1, 8, {}, {}, {});
+
+  // 6 ops = 3 N4 + 3 non-N4. Anti-consécutif nuit → seulement 1 non-N4 dispo
+  // certaines semaines. L'algo fait de son mieux et alerte si nuit < 3.
+  const nuitSizes = sc.map(s=>s.nuit.length);
+  const minNuit = Math.min(...nuitSizes);
+  assert(`6 ops : nuit ≥ 3 minimum (trouvé ${minNuit})`, minNuit >= 3);
+
+  const hasNuitAlert = sc.some(s=>s.alerts.some(a=>a.includes("Nuits consécutives")));
+  assert("6 ops : dérogation nuits consécutives signalée", hasNuitAlert);
+
+  const allN4ok = sc.every(s =>
+    getN4(s,"nuit",ops6).length>=1
+  );
+  assert("6 ops : 1 N4 en nuit chaque semaine", allN4ok);
+
+  const consec = hasConsecNuit(sc);
+  assert("6 ops : nuits consécutives permises pour couvrir les nuits", !!consec);
+}
+
+// ── 15. 52 SEMAINES — stress test ────────────────────────────────────
+section("15. Stress test — 52 semaines, config standard");
+{
+  const t0 = performance.now();
+  const {schedules:sc} = buildSchedules(OPS_9, 1, 52, {}, {}, {});
+  const dt = performance.now()-t0;
+
+  assert(`Performance : 52 semaines en ${dt.toFixed(0)}ms (< 500ms)`, dt < 500);
+
+  const allNuit3 = sc.every(s => s.nuit.length === 3);
+  assert("52 sem : toujours 3 en nuit", allNuit3);
+
+  const consec = hasConsecNuit(sc);
+  assert("52 sem : pas de nuit consécutive", !consec);
+
+  const noDup = sc.every(s => {
+    const all = [...s.matin,...s.am,...s.nuit];
+    return new Set(all).size === all.length;
+  });
+  assert("52 sem : aucun doublon", noDup);
+}
+
+// ── 16. CONGÉS MULTIPLES + ABSENCES CROISÉES ─────────────────────────
+section("16. Combo — congés multiples + absences croisées");
+{
+  const leaves = { 5: ["MARTIN"], 6: ["MARTIN","LENDORMY"], 7: ["LENDORMY"] };
+  const abs = { 6: ["HEBERT"] };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 10, abs, leaves, {});
+
+  const s6 = sc.find(x=>x.s===6);
+  const absentS6 = ["MARTIN","LENDORMY","HEBERT"];
+  const nonePresent = absentS6.every(n =>
+    !s6.matin.includes(n) && !s6.am.includes(n) && !s6.nuit.includes(n)
+  );
+  assert("S6 : MARTIN+LENDORMY+HEBERT tous absents", nonePresent);
+  assert("S6 : GIBEAUX couvre (seul N4)", s6.nuit.includes("GIBEAUX")||s6.am.includes("GIBEAUX")||s6.matin.includes("GIBEAUX"));
+  assert("S6 : alertes N4 insuffisant", s6.alerts.some(a=>a.includes("chef(s)")));
+}
+
+// ── 17. ARCHIVE — semaines écoulées figées ───────────────────────────
+section("17. Archive — le passé ne bouge jamais (fiabilité paie)");
+{
+  // S1-S3 archivées avec un effectif qui inclut un opérateur SUPPRIMÉ depuis (DUPONT)
+  const archive = {
+    1: { matin:["MARTIN","VALLET","DUPONT"], am:["LENDORMY","BRUNY"], nuit:["GIBEAUX","CADINOT","ALLAIN"] },
+    2: { matin:["GIBEAUX","CADINOT","ALLAIN"], am:["MARTIN","DUPONT"], nuit:["LENDORMY","VALLET","BRUNY"] },
+    3: { matin:["LENDORMY","VALLET","BRUNY"], am:["GIBEAUX","CADINOT"], nuit:["MARTIN","ALLAIN","HEBERT"] },
+  };
+  const {schedules:sc} = buildSchedules(OPS_8, 1, 8, {}, {}, {}, archive);
+
+  const s1 = sc.find(x=>x.s===1), s2 = sc.find(x=>x.s===2), s3 = sc.find(x=>x.s===3), s4 = sc.find(x=>x.s===4);
+  assert("S1-S3 restituées EXACTEMENT depuis l'archive",
+    s1.matin.join()===archive[1].matin.join() && s2.am.join()===archive[2].am.join() && s3.nuit.join()===archive[3].nuit.join());
+  assert("Opérateur supprimé (DUPONT) conservé dans l'archive", s1.matin.includes("DUPONT"));
+  assert("Semaines archivées marquées isArchived", s1.isArchived===true && s3.isArchived===true);
+  assert("S4 (non archivée) recalculée par l'algo", !s4.isArchived && s4.nuit.length===3);
+  // L'archive sert de contexte : MARTIN en nuit S3 → pas en nuit S4
+  assert("S4 : MARTIN pas en nuit (était en nuit S3 archivée)", !s4.nuit.includes("MARTIN"));
+  // L'archive prime sur un override de la même semaine
+  const ovConflict = { 2: { matin:["MARTIN"], am:["LENDORMY"], nuit:["GIBEAUX","VALLET","BRUNY"] } };
+  const {schedules:sc2} = buildSchedules(OPS_8, 1, 4, {}, {}, ovConflict, archive);
+  assert("Archive prioritaire sur override pour la même semaine",
+    sc2.find(x=>x.s===2).matin.join()===archive[2].matin.join());
+}
+
+// ── 18. ARRIVÉE EN COURS D'ANNÉE (fromWeek) ─────────────────────────
+section("18. Arrivée en cours d'année — fromWeek");
+{
+  const ops = OPS_8.map(o=>({...o}));
+  ops.push({id:"nouveau",full:"Paul NOUVEAU",short:"NOUVEAU",level:"N1",active:true,isVolant:false,fromWeek:10});
+  const {schedules:sc, nightCount, presentCount} = buildSchedules(ops, 1, 20, {}, {}, {});
+
+  const beforeArrival = sc.filter(x=>x.s<10).every(s=>
+    !s.matin.includes("NOUVEAU") && !s.am.includes("NOUVEAU") && !s.nuit.includes("NOUVEAU"));
+  assert("NOUVEAU jamais planifié avant S10", beforeArrival);
+
+  const afterArrival = sc.filter(x=>x.s>=10).some(s=>
+    s.matin.includes("NOUVEAU") || s.am.includes("NOUVEAU") || s.nuit.includes("NOUVEAU"));
+  assert("NOUVEAU planifié à partir de S10", afterArrival);
+
+  assert(`Présence comptée au prorata (11 sem, trouvé=${presentCount["NOUVEAU"]})`, presentCount["NOUVEAU"]===11);
+
+  // Équité proportionnelle : le nouveau ne doit pas être surchargé en nuits pour "rattraper"
+  const veteranNights = OPS_8.filter(o=>o.level==="N1").map(o=>nightCount[o.short]);
+  const maxVeteran = Math.max(...veteranNights);
+  assert(`NOUVEAU pas surchargé en nuits (${nightCount["NOUVEAU"]} ≤ vétérans max ${maxVeteran})`,
+    nightCount["NOUVEAU"] <= maxVeteran);
+}
+
+// ── 19. DÉPART EN COURS D'ANNÉE (toWeek) ────────────────────────────
+section("19. Départ en cours d'année — toWeek");
+{
+  const ops = OPS_8.map(o=>({...o}));
+  ops.find(o=>o.short==="HEBERT").toWeek = 8;
+  const {schedules:sc} = buildSchedules(ops, 1, 15, {}, {}, {});
+
+  const beforeDeparture = sc.filter(x=>x.s<=8).every(s=>
+    s.matin.includes("HEBERT") || s.am.includes("HEBERT") || s.nuit.includes("HEBERT"));
+  assert("HEBERT planifié jusqu'à S8 incluse", beforeDeparture);
+
+  const afterDeparture = sc.filter(x=>x.s>8).every(s=>
+    !s.matin.includes("HEBERT") && !s.am.includes("HEBERT") && !s.nuit.includes("HEBERT"));
+  assert("HEBERT jamais planifié après S8", afterDeparture);
+
+  const consec = hasConsecNuit(sc);
+  assert("Pas de nuit consécutive malgré le départ", !consec);
+
+  const allNuit3 = sc.every(s => s.nuit.length === 3);
+  assert("Toujours 3 en nuit malgré le départ (7 ops restants)", allNuit3);
+}
+
+// ── 20. ÉQUITÉ effectif stable — répartition PAR RÔLE (non-régression) ──
+section("20. Non-régression — équité par rôle sur 52 semaines (effectif stable)");
+{
+  const {nightCount} = buildSchedules(OPS_8, 1, 52, {}, {}, {});
+  const n4   = OPS_8.filter(o=>o.level==="N4").map(o=>nightCount[o.short]);
+  const non4 = OPS_8.filter(o=>o.level!=="N4").map(o=>nightCount[o.short]);
+  const spread = a=>Math.max(...a)-Math.min(...a);
+  // Au sein d'un même rôle, la charge de nuit doit rester serrée.
+  // L'écart N4↔non-N4 est STRUCTUREL (la nuit = 1 N4 + 2 non-N4), pas une inéquité.
+  assert(`Nuits équilibrées entre les 3 N4 (écart=${spread(n4)})`, spread(n4)<=2);
+  assert(`Nuits équilibrées entre les 5 non-N4 (écart=${spread(non4)})`, spread(non4)<=2);
+}
+
+// ── 21. HEURES — nuit par poste & jours du mois (bissextiles) ───────────
+section("21. Heures — calcul nuit par poste & mois calendaire");
+{
+  const night=nightHoursForShift, dim=daysInMonth;
+
+  assert("Poste Nuit = 7h de nuit (plafonné aux heures payées)", Math.abs(night("nuit")-7)<1e-9, night("nuit"));
+  assert("Poste AM = 0h de nuit (finit à 22h pile)", Math.abs(night("am")-0)<1e-9, night("am"));
+  assert("Poste Matin = 10 min de nuit (5h50–6h)", Math.abs(night("matin")-10/60)<1e-9, night("matin"));
+
+  assert("Février 2024 (bissextile) = 29 jours", dim(2024,1)===29, dim(2024,1));
+  assert("Février 2026 (non bissextile) = 28 jours", dim(2026,1)===28, dim(2026,1));
+  assert("Février 2000 (bissextile séculaire) = 29 jours", dim(2000,1)===29, dim(2000,1));
+  assert("Février 2100 (non bissextile séculaire) = 28 jours", dim(2100,1)===28, dim(2100,1));
+  assert("Avril = 30 jours · Décembre = 31 jours", dim(2026,3)===30 && dim(2026,11)===31);
+}
+
+// ── 22. HEURES — 35h/semaine, samedi en heures sup ──────────────────────
+section("22. Heures — seuil hebdo 35h et heures sup");
+{
+  const PAID=PAID_HOURS_PER_SHIFT, BASE=WEEKLY_BASE;
+  const wk5=5*PAID, wk6=6*PAID;
+  assert("Semaine Lun–Ven = 35h → 0 heure sup", wk5===35 && Math.max(0,wk5-BASE)===0, wk5);
+  assert("Semaine + samedi = 42h → 7 heures sup", wk6===42 && Math.max(0,wk6-BASE)===7, wk6);
+  // Répartition prorata d'une semaine à cheval (4 jours mois A, 1 jour mois B, samedi mois B)
+  const weekTotal=42, supWeek=Math.max(0,weekTotal-BASE); // 7
+  const inA=4*PAID, inB=2*PAID; // 28 + 14
+  const supA=supWeek*(inA/weekTotal), supB=supWeek*(inB/weekTotal);
+  assert("Heures sup réparties au prorata (4j/2j) ≈ 4,67 + 2,33", Math.abs(supA+supB-7)<1e-9 && Math.abs(supA-7*28/42)<1e-9);
+}
+
+// ── 23. HEURES — jour aménagé : nuit recalculée d'après les horaires ────
+section("23. Heures — jour aménagé (horaires décalés → nuit recalculée)");
+{
+  const nightWin=nightHoursForWindow;
+  // Exemple dirigeant : Matin 8–16, AM 11–19, Nuit 14–22 → personne en heures de nuit ce jour-là
+  assert("Aménagé Matin 8h–16h : 0h de nuit", Math.abs(nightWin("08:00","16:00"))<1e-9, nightWin("08:00","16:00"));
+  assert("Aménagé AM 11h–19h : 0h de nuit", Math.abs(nightWin("11:00","19:00"))<1e-9, nightWin("11:00","19:00"));
+  assert("Aménagé Nuit 14h–22h : 0h de nuit", Math.abs(nightWin("14:00","22:00"))<1e-9, nightWin("14:00","22:00"));
+  // Cohérence : les horaires standards via fenêtre = mêmes valeurs que le calcul par poste
+  assert("Standard Nuit 21h50–6h via fenêtre = 7h", Math.abs(nightWin("21:50","06:00")-7)<1e-9, nightWin("21:50","06:00"));
+  assert("Standard Matin 5h50–14h via fenêtre = 0h10", Math.abs(nightWin("05:50","14:00")-10/60)<1e-9, nightWin("05:50","14:00"));
+  // Créneau de nuit partiel : 20h–4h → nuit = 22h→4h = 6h
+  assert("Créneau 20h–4h : 6h de nuit (22h→4h)", Math.abs(nightWin("20:00","04:00")-6)<1e-9, nightWin("20:00","04:00"));
+}
+
+// ════════════════════════════════════════════════════════════════════════
+
+return results;
+}
